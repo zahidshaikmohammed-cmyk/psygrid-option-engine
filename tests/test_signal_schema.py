@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from psygrid_option_engine.signals.schema import (
     ContractRef,
     DataQuality,
+    DevelopingSetup,
     ExecutionPlan,
     ExecutionQuality,
     NoTradeSignal,
@@ -85,6 +86,7 @@ def test_trade_ready_full_signal() -> None:
         underlying="NIFTY",
         data_quality=_data_quality(),
         reasons=["structure: higher-high confirmed above opening range"],
+        tier=2,
         direction="CALL",
         contract=_contract(),
         execution=ExecutionPlan(**_execution()),
@@ -119,3 +121,60 @@ def test_schema_version_pinned() -> None:
             data_quality=_data_quality(),
             reasons=["x"],
         )
+
+
+def test_no_trade_default_tier_is_zero() -> None:
+    sig = NoTradeSignal(
+        decision_timestamp=NOW, underlying="NIFTY", data_quality=_data_quality(), reasons=["x"]
+    )
+    assert sig.tier == 0
+
+
+def test_trade_ready_rejects_tier_zero() -> None:
+    with pytest.raises(ValidationError):
+        TradeReadySignal(
+            decision_timestamp=NOW,
+            underlying="NIFTY",
+            data_quality=_data_quality(),
+            reasons=["x"],
+            tier=0,
+            direction="CALL",
+            contract=_contract(),
+            execution=ExecutionPlan(**_execution()),
+            execution_quality=ExecutionQuality(
+                spread_pct=0.8, depth_assessment="adequate", liquidity_assessment="adequate"
+            ),
+        )
+
+
+def test_tier_out_of_bounds_rejected() -> None:
+    with pytest.raises(ValidationError):
+        NoTradeSignal(
+            decision_timestamp=NOW,
+            underlying="NIFTY",
+            data_quality=_data_quality(),
+            reasons=["x"],
+            tier=5,
+        )
+
+
+def test_no_trade_carries_best_developing_setup() -> None:
+    setup = DevelopingSetup(
+        framework="TREND_CONTINUATION",
+        direction="CALL",
+        tier=0,
+        tier_label="MARKET/SETUP ONLY",
+        evidence_summary=["structure bullish"],
+        missing_confirmation=["need R:R >= 1.2"],
+        upgrade_condition="risk/reward improves to at least 1.2",
+        invalidation_condition="price closes below the last swing low",
+    )
+    sig = NoTradeSignal(
+        decision_timestamp=NOW,
+        underlying="NIFTY",
+        data_quality=_data_quality(),
+        reasons=["no actionable opportunity; best developing setup reported"],
+        best_developing_setup=setup,
+    )
+    assert sig.best_developing_setup is not None
+    assert sig.best_developing_setup.upgrade_condition.startswith("risk/reward")

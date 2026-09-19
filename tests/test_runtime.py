@@ -46,12 +46,16 @@ def test_market_closed_returns_session_complete_without_network_call(fast_settin
     runtime.close()
 
 
-def test_market_open_with_healthy_data_reaches_market_analysis(fast_settings: Settings) -> None:
+def test_market_open_with_healthy_data_reaches_a_decision(fast_settings: Settings) -> None:
     runtime = _make_runtime(fast_settings, _healthy_handler)
     result = runtime.run_cycle("NIFTY", now=WITHIN_SESSION_UTC)
 
-    assert result.state is EngineState.MARKET_ANALYSIS
-    assert result.signal is None
+    # Minimal fixture data can't produce enough evidence for TRADE_READY,
+    # but the full pipeline must run end to end and produce a real,
+    # reasoned decision either way - never silently stop partway.
+    assert result.state in (EngineState.NO_TRADE, EngineState.TRADE_READY)
+    assert result.signal is not None
+    assert result.signal.reasons
     assert result.data_quality is not None
     assert result.data_quality.critical_endpoints_ok is True
     runtime.close()
@@ -62,15 +66,16 @@ def test_session_cutoff_still_allows_data_loading_but_flags_no_new_entries(
 ) -> None:
     # POST_ENTRY_CUTOFF (>= 15:00 IST) is still "within session" (positions
     # may still be open / monitored) even though no *new* entries should be
-    # authorized; that authorization-level cutoff enforcement is Phase 5/9,
-    # but the session-window primitive itself must distinguish the two.
+    # authorized; the session-window primitive itself distinguishes the two,
+    # and the risk gate (tested more directly in test_decision.py) is what
+    # actually enforces the cutoff against a real candidate.
     from datetime import datetime
 
     post_cutoff = datetime(2026, 9, 18, 9, 45, tzinfo=UTC)  # 15:15 IST
     runtime = _make_runtime(fast_settings, _healthy_handler)
     result = runtime.run_cycle("NIFTY", now=post_cutoff)
 
-    assert result.state is EngineState.MARKET_ANALYSIS
+    assert result.state in (EngineState.NO_TRADE, EngineState.TRADE_READY)
 
     window = fast_settings.session_window()
     assert window.is_within_session(post_cutoff) is True
@@ -104,7 +109,7 @@ def test_unsupported_underlying_raises_configuration_error(fast_settings: Settin
 def test_banknifty_supported(fast_settings: Settings) -> None:
     runtime = _make_runtime(fast_settings, _healthy_handler)
     result = runtime.run_cycle("BANKNIFTY", now=WITHIN_SESSION_UTC)
-    assert result.state is EngineState.MARKET_ANALYSIS
+    assert result.state in (EngineState.NO_TRADE, EngineState.TRADE_READY)
     runtime.close()
 
 

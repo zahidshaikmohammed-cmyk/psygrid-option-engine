@@ -1,6 +1,11 @@
-"""Orchestration entrypoint. Drives the state machine through the phases
-implemented so far (STARTUP..DATA_VALIDATION) and reports honestly where it
-stops. See docs/STATE_MACHINE.md and docs/PHASES.md.
+"""Orchestration entrypoint. Drives the full state machine
+(STARTUP..TRADE_READY/NO_TRADE/SESSION_COMPLETE) for one decision cycle.
+See docs/STATE_MACHINE.md and docs/PHASES.md.
+
+The actual authorization/selection/execution/risk pipeline is
+`api/decision.py::decide` - the same function `replay/engine.py` uses -
+this module is only responsible for the network fetch, the session-window
+short-circuit, and mapping the outcome onto the documented state graph.
 """
 
 from __future__ import annotations
@@ -8,13 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from psygrid_option_engine.api.decision import decide
 from psygrid_option_engine.api.state_machine import EngineState, assert_valid_transition
 from psygrid_option_engine.config.settings import Settings, get_settings
 from psygrid_option_engine.data.client import PsygridClient
 from psygrid_option_engine.data.exceptions import ConfigurationError
 from psygrid_option_engine.data.models import RawFetchBundle
-from psygrid_option_engine.data.validation import build_data_quality
-from psygrid_option_engine.signals.schema import DataQuality, NoTradeSignal, Signal
+from psygrid_option_engine.data.snapshot_builder import build_market_snapshot
+from psygrid_option_engine.signals.schema import DataQuality, Signal
 
 
 @dataclass(frozen=True)
@@ -87,17 +93,12 @@ class EngineRuntime:
         assert_valid_transition(state, EngineState.DATA_VALIDATION)
         state = EngineState.DATA_VALIDATION
 
-        data_quality = build_data_quality(bundle, settings=self._settings, as_of=now)
+        snapshot = build_market_snapshot(bundle, as_of=now, settings=self._settings)
+        data_quality = snapshot.data_quality
 
         if not data_quality.critical_endpoints_ok:
-            reasons = _critical_failure_reasons(bundle)
             assert_valid_transition(state, EngineState.NO_TRADE)
-            signal = NoTradeSignal(
-                decision_timestamp=now,
-                underlying=underlying,  # type: ignore[arg-type]
-                data_quality=data_quality,
-                reasons=reasons,
-            )
+            signal = decide(snapshot, settings=self._settings)
             return CycleResult(
                 state=EngineState.NO_TRADE,
                 underlying=underlying,
@@ -108,29 +109,38 @@ class EngineRuntime:
             )
 
         assert_valid_transition(state, EngineState.MARKET_ANALYSIS)
+        state = EngineState.MARKET_ANALYSIS
+        assert_valid_transition(state, EngineState.STRUCTURE_ANALYSIS)
+        state = EngineState.STRUCTURE_ANALYSIS
+        assert_valid_transition(state, EngineState.AUTHORIZATION)
+        state = EngineState.AUTHORIZATION
+
+        # `decide()` performs authorization -> contract selection -> trade
+        # engineering -> risk validation as one deterministic function
+        # (shared with replay/engine.py); we still walk the documented
+        # transition graph here so it stays an enforced, checked contract.
+        signal = decide(snapshot, settings=self._settings)
+
+        if signal.state == "TRADE_READY":
+            for frm, to in (
+                (EngineState.AUTHORIZATION, EngineState.CONTRACT_SELECTION),
+                (EngineState.CONTRACT_SELECTION, EngineState.TRADE_ENGINEERING),
+                (EngineState.TRADE_ENGINEERING, EngineState.RISK_VALIDATION),
+                (EngineState.RISK_VALIDATION, EngineState.TRADE_READY),
+            ):
+                assert_valid_transition(frm, to)
+            final_state = EngineState.TRADE_READY
+            message = "Trade-ready signal produced."
+        else:
+            assert_valid_transition(state, EngineState.NO_TRADE)
+            final_state = EngineState.NO_TRADE
+            message = "No actionable trade this cycle."
+
         return CycleResult(
-            state=EngineState.MARKET_ANALYSIS,
+            state=final_state,
             underlying=underlying,
             bundle=bundle,
             data_quality=data_quality,
-            signal=None,
-            message=(
-                "Critical data OK. Structure/authorization/contract-selection/"
-                "execution/risk pipeline (Phases 3-9) is not yet implemented; "
-                "no TRADE_READY/NO_TRADE signal produced this cycle."
-            ),
+            signal=signal,
+            message=message,
         )
-
-
-def _critical_failure_reasons(bundle: RawFetchBundle) -> list[str]:
-    reasons: list[str] = []
-    for name, result in bundle.critical_results().items():
-        if result.error is not None:
-            reasons.append(f"critical endpoint '{name}' failed: {result.error}")
-        elif result.data is None:
-            reasons.append(f"critical endpoint '{name}' returned no data")
-        elif result.issues:
-            reasons.append(f"critical endpoint '{name}' structurally invalid: {'; '.join(result.issues)}")
-    if not reasons:
-        reasons.append("critical endpoint data unavailable for an unspecified reason")
-    return reasons

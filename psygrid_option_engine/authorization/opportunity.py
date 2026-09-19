@@ -32,6 +32,7 @@ class Opportunity:
     tier: TierAssessment
     risk_reward: float | None
     invalidation_level: float
+    target_level: float | None
     evidence_summary: tuple[str, ...]
     conflicts: tuple[str, ...]
 
@@ -49,16 +50,31 @@ class OpportunityScan:
     best_developing: Opportunity | None = None
 
 
-def _risk_reward_proxy(framework: FrameworkResult, ltp: float | None) -> float | None:
+def _effective_target(framework: FrameworkResult, ctx: FrameworkContext) -> float | None:
+    """Most frameworks (everything except TREND_CONTINUATION/
+    COMPRESSION_EXPANSION) don't compute their own target - falling back
+    to the session's expected-range boundary in the framework's direction
+    keeps them from being structurally unable to ever reach an actionable
+    tier, while still never fabricating a level: if the range model itself
+    is unavailable, this stays None and the opportunity is correctly
+    blocked on R:R, same as before."""
+    if framework.target_level is not None:
+        return framework.target_level
+    if ctx.range_model is None:
+        return None
+    return ctx.range_model.upper_boundary if framework.direction == "CALL" else ctx.range_model.lower_boundary
+
+
+def _risk_reward_proxy(framework: FrameworkResult, ltp: float | None, target: float | None) -> float | None:
     """A structure-space proxy R:R (reward distance / risk distance) used
     only to feed the tier gate before a real contract/premium exists.
     `execution/engine.py` computes the authoritative premium-space R:R
     later; this is deliberately conservative (falls back to None, which
     fails every tier's R:R requirement, rather than guessing)."""
-    if ltp is None or framework.target_level is None or framework.invalidation_level is None:
+    if ltp is None or target is None or framework.invalidation_level is None:
         return None
     risk = abs(ltp - framework.invalidation_level)
-    reward = abs(framework.target_level - ltp)
+    reward = abs(target - ltp)
     if risk <= 0:
         return None
     return reward / risk
@@ -88,7 +104,8 @@ def build_opportunities(
         direction = framework.direction
         items = list(evidence_by_direction.get(direction, ()))
         confluence = build_confluence(items)
-        risk_reward = _risk_reward_proxy(framework, ctx.ltp)
+        target = _effective_target(framework, ctx)
+        risk_reward = _risk_reward_proxy(framework, ctx.ltp, target)
         liquidity_quality = liquidity_quality_by_direction.get(direction, "UNKNOWN")
 
         tier = assess_tier(
@@ -108,6 +125,7 @@ def build_opportunities(
                 tier=tier,
                 risk_reward=risk_reward,
                 invalidation_level=framework.invalidation_level,
+                target_level=target,
                 evidence_summary=tuple(f"{i.stream}: {i.detail}" for i in items),
                 conflicts=confluence.contradictions,
             )

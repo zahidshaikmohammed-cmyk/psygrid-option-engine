@@ -88,6 +88,23 @@ class ExecutionQuality(BaseModel):
     liquidity_assessment: str
 
 
+class DevelopingSetup(BaseModel):
+    """The strongest current setup even when it isn't (yet) actionable -
+    brief section 2/22: a NO_TRADE outcome must still report current
+    state, what's missing, and what would upgrade or invalidate it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    framework: str
+    direction: Direction
+    tier: int = Field(ge=0, le=4)
+    tier_label: str
+    evidence_summary: list[str] = Field(default_factory=list)
+    missing_confirmation: list[str] = Field(default_factory=list)
+    upgrade_condition: str
+    invalidation_condition: str
+
+
 class SignalBase(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -97,6 +114,12 @@ class SignalBase(BaseModel):
     decision_timestamp: datetime
     underlying: Underlying
     data_quality: DataQuality
+    tier: int = Field(default=0, ge=0, le=4)
+    market_state: dict = Field(default_factory=dict)
+    structure: dict = Field(default_factory=dict)
+    authorization: dict = Field(default_factory=dict)
+    option_analysis: dict = Field(default_factory=dict)
+    risk: dict = Field(default_factory=dict)
     reasons: list[str]
 
     @model_validator(mode="after")
@@ -108,10 +131,7 @@ class SignalBase(BaseModel):
 
 class NoTradeSignal(SignalBase):
     state: Literal["NO_TRADE"] = "NO_TRADE"
-    structure: dict | None = None
-    authorization: dict | None = None
-    option_analysis: dict | None = None
-    risk: dict | None = None
+    best_developing_setup: DevelopingSetup | None = None
 
 
 class TradeReadySignal(SignalBase):
@@ -119,12 +139,13 @@ class TradeReadySignal(SignalBase):
     direction: Direction
     contract: ContractRef
     execution: ExecutionPlan
-    market_state: dict = Field(default_factory=dict)
-    structure: dict = Field(default_factory=dict)
-    authorization: dict = Field(default_factory=dict)
-    option_analysis: dict = Field(default_factory=dict)
-    risk: dict = Field(default_factory=dict)
     execution_quality: ExecutionQuality
+
+    @model_validator(mode="after")
+    def _tier_must_be_actionable(self) -> TradeReadySignal:
+        if self.tier < 1:
+            raise ValueError("TRADE_READY signal must have tier >= 1")
+        return self
 
 
 Signal = NoTradeSignal | TradeReadySignal
