@@ -2,13 +2,18 @@
 
 ## 0. Status
 
-This document describes the target architecture for `psygrid-option-engine`.
-**Implemented so far: Phase 1 (skeleton, config, schemas) and Phase 2
-(upstream client + validation).** Everything from Phase 3 onward
-(`structure/`, `authorization/`, `options/`, `execution/`, `risk/`,
-`replay/`) exists only as an empty package with a docstring describing its
-future responsibility. Nothing in this repository currently produces a
-trading signal. See `docs/PHASES.md` for the phase-by-phase plan and status.
+This document describes the architecture of `psygrid-option-engine`.
+**Phases 0–10 are implemented**: the full pipeline from upstream fetch
+through structure/momentum/volatility/futures/option-chain/breadth
+evidence, the authorization/confluence/tier engine, contract selection,
+premium execution engineering, and risk validation, wired end to end via
+`api/decision.py::decide` and runnable through `run_engine.py`. Only
+Phase 11 (replay outcome measurement and calibration) remains partial —
+the capture/replay machinery exists and is tested, but nothing has
+measured real outcomes against it yet. See `docs/PHASES.md` for the
+phase-by-phase status and known v1 limitations (most notably: the
+upstream field-name contract is still unverified against a real
+production payload — see `docs/ENDPOINTS.md`).
 
 ## 1. Repository boundary
 

@@ -6,12 +6,23 @@ upstream service) and produces a strictly-typed `TRADE_READY` or `NO_TRADE`
 signal — never an order. See `docs/SAFETY.md`: this engine never places
 broker orders.
 
-**Status: Phases 1–2 of 11 implemented.** The upstream client, config, core
-schemas, and data validation are real and tested. The trading logic itself
-(structure, authorization, option selection, execution, risk) is not yet
-implemented — see `docs/PHASES.md` for the plan and honest status per
-phase. Do not treat anything this repository currently outputs as a trade
-recommendation.
+**Status: Phases 0–10 of 11 implemented** (replay's capture/replay
+machinery exists; outcome measurement and calibration don't yet — see
+`docs/PHASES.md`). The full pipeline — data ingestion, structure/momentum/
+volatility/futures/chain/breadth analysis, the authorization/confluence/
+tier engine, contract selection, premium execution engineering, and risk
+validation — is real, tested, deterministic logic, wired end to end
+through `run_engine.py`.
+
+**⚠️ The upstream field-name contract is still unverified against a real
+production payload** (see `docs/ENDPOINTS.md` — this sandbox has no
+network route to the production host). Everything past the one adapter
+module that knows about raw field names (`data/snapshot_builder.py`) is
+built against this engine's own canonical types and doesn't change when
+that gets corrected — but until it is, treat any live run against the real
+upstream as unverified, and do not treat its output as a trade
+recommendation. `docs/PHASES.md` has the full honest rundown of what's
+solid v1 vs. what's a known, documented gap.
 
 ## Documentation
 
@@ -53,13 +64,23 @@ See [`docs/CONFIG.md`](docs/CONFIG.md) for every variable.
 ## Run
 
 ```bash
-python -m psygrid_option_engine --underlying NIFTY
+python run_engine.py --once [--underlying NIFTY|BANKNIFTY|BOTH]
+python run_engine.py --live [--interval SECONDS]
 ```
 
-Today this runs the engine through `DATA_LOADING` → `DATA_VALIDATION` and
-reports what it fetched, whether critical data is present and fresh, and
-exits — it does not yet produce a trading signal (Phases 3–9 are not
-implemented). See `docs/PHASES.md`.
+Runs the full intelligence cycle and prints a human-readable report plus
+the current best opportunity (or an honest `NO_TRADE` with the strongest
+developing setup, what's missing, and what would upgrade/invalidate it).
+`--live` repeats this on an interval, printing only when a tracked setup's
+state actually changes. **Signal-only — see `docs/SAFETY.md`: this process
+never places a broker order.**
+
+There is also a lower-level entrypoint that stops after data loading/
+validation, useful for checking upstream connectivity/data-quality alone:
+
+```bash
+python -m psygrid_option_engine --underlying NIFTY
+```
 
 ## Test
 
