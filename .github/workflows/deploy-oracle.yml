@@ -138,20 +138,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          deployed="$(ssh -i "$HOME/.ssh/oracle_deploy_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            ubuntu@140.245.226.102 \
+            'cat "$HOME/psygrid-option-engine/.deploy-commit"')"
+
+          echo "oracle_deployed_commit=$deployed"
+          test "$deployed" = "$GITHUB_SHA"
+
           ssh -i "$HOME/.ssh/oracle_deploy_key" \
             -o BatchMode=yes \
             -o ConnectTimeout=10 \
-            ubuntu@140.245.226.102 'bash -s' <<'REMOTE'
-          set -euo pipefail
+            ubuntu@140.245.226.102 \
+            'sudo systemctl is-active --quiet psygrid-option-engine.service'
 
-          cd "$HOME/psygrid-option-engine"
-          deployed="$(cat .deploy-commit)"
-          expected="${DEPLOY_SHA:-}"
-          echo "oracle_deployed_commit=$deployed"
-
-          test "$deployed" = "$expected"
-          sudo systemctl is-active --quiet psygrid-option-engine.service
           echo "oracle_service=active"
-          REMOTE
-        env:
-          DEPLOY_SHA: ${{ github.sha }}
