@@ -55,11 +55,15 @@ v1 limitations, called out in each module's own docstring:
   continuation, structured pullback, liquidity-sweep confirmation, range
   rejection, failed-breakout reversal, confirmed structural breakout,
   compression→expansion), not an exhaustive catalogue.
-- **`--live` mode's lifecycle dedup doesn't yet detect invalidation/target
-  hits between ticks** (it never calls `LifecycleTracker.update(...,
-  invalidated=True/targeted=True)`) — it correctly avoids re-printing an
-  unchanged setup, but doesn't yet actively monitor an active trade's
-  outcome tick-to-tick.
+- **`--live` mode now monitors an active `TRADE_READY` signal tick-to-tick**
+  (`run_engine.py::_check_active_trades`): each cycle it checks the
+  underlying's current LTP against the structural invalidation level and
+  looks up the selected contract's current premium (from that same tick's
+  already-fetched data, no extra request) against the stop/target, and
+  calls `LifecycleTracker.update(..., invalidated=True/targeted=True)`
+  accordingly. This lives in `run_engine.py`, not `api/decision.py` —
+  tick-to-tick position monitoring is live-loop bookkeeping, deliberately
+  kept out of the stateless decision core.
 
 None of this is fabricated data or a fake pass-through — every gap above
 is a documented "not yet" with an honest fallback (usually `None`/

@@ -12,6 +12,9 @@ import pytest
 
 from psygrid_option_engine.api.runtime import CycleResult
 from psygrid_option_engine.api.state_machine import EngineState
+from psygrid_option_engine.config.settings import EndpointCriticality, Settings
+from psygrid_option_engine.data.models import EndpointFetchResult, RawFetchBundle
+from psygrid_option_engine.signals.lifecycle import LifecycleState, LifecycleTracker
 from psygrid_option_engine.signals.schema import (
     ContractRef,
     DataQuality,
@@ -194,3 +197,155 @@ def test_run_live_stops_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch, c
     assert exit_code == 0
     assert "Stopped." in out
     assert call_count["n"] == 2
+
+
+# --- active-trade (invalidation/target) monitoring -------------------------
+
+
+def _options_bundle(security_id: str, ltp: float, *, as_of: datetime) -> RawFetchBundle:
+    result = EndpointFetchResult(
+        logical_name="options", url="/public/nifty-options.json", criticality=EndpointCriticality.CRITICAL,
+        requested_at=as_of, fetched_at=as_of, latency_ms=1.0, http_status=200,
+        data={"data": [{"strike": 24550, "option_type": "CE", "security_id": security_id, "ltp": ltp}]},
+        observed_at=as_of, issues=(), error=None,
+    )
+    return RawFetchBundle(underlying="NIFTY", requested_at=as_of, results={"options": result})
+
+
+def _trade(**overrides: object) -> run_engine.ActiveTrade:  # noqa: F821 - resolved at runtime via loaded module
+    defaults: dict = dict(
+        key=run_engine._lifecycle_key("NIFTY", _trade_ready_signal()),
+        underlying="NIFTY", direction="CALL", security_id="CE1",
+        entry=120.0, stop_loss=90.0, take_profit=170.0,
+        structural_invalidation_level=24478.0, triggered_at=NOW,
+    )
+    defaults.update(overrides)
+    return run_engine.ActiveTrade(**defaults)
+
+
+def _result_with_ltp_and_premium(*, ltp: float, security_id: str | None, premium: float | None) -> CycleResult:
+    signal = _no_trade_signal()
+    signal = signal.model_copy(update={"market_state": {**signal.market_state, "ltp": ltp}})
+    bundle = _options_bundle(security_id, premium, as_of=NOW) if (security_id and premium is not None) else None
+    return CycleResult(EngineState.NO_TRADE, "NIFTY", bundle, _data_quality(), signal, "x")
+
+
+def test_register_new_active_trades_adds_entry() -> None:
+    results = {
+        "NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), _trade_ready_signal(), "x")
+    }
+    active: dict = {}
+    run_engine._register_new_active_trades(active, results, NOW)
+    assert "NIFTY" in active
+    assert active["NIFTY"].security_id == "CE1"
+    assert active["NIFTY"].direction == "CALL"
+
+
+def test_register_skips_if_already_tracked() -> None:
+    results = {
+        "NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), _trade_ready_signal(), "x")
+    }
+    existing = _trade(security_id="OLD")
+    active = {"NIFTY": existing}
+    run_engine._register_new_active_trades(active, results, NOW)
+    assert active["NIFTY"] is existing
+
+
+def test_register_skips_no_trade_signal() -> None:
+    results = {"NIFTY": CycleResult(EngineState.NO_TRADE, "NIFTY", None, _data_quality(), _no_trade_signal(), "x")}
+    active: dict = {}
+    run_engine._register_new_active_trades(active, results, NOW)
+    assert active == {}
+
+
+def test_current_premium_found_in_bundle() -> None:
+    bundle = _options_bundle("CE1", 150.0, as_of=NOW)
+    result = CycleResult(EngineState.TRADE_READY, "NIFTY", bundle, _data_quality(), _trade_ready_signal(), "x")
+    assert run_engine._current_premium(result, "CE1", as_of=NOW, settings=Settings()) == 150.0
+
+
+def test_current_premium_missing_bundle_returns_none() -> None:
+    result = CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), _trade_ready_signal(), "x")
+    assert run_engine._current_premium(result, "CE1", as_of=NOW, settings=Settings()) is None
+
+
+def test_current_premium_security_not_found_returns_none() -> None:
+    bundle = _options_bundle("OTHER", 150.0, as_of=NOW)
+    result = CycleResult(EngineState.TRADE_READY, "NIFTY", bundle, _data_quality(), _trade_ready_signal(), "x")
+    assert run_engine._current_premium(result, "CE1", as_of=NOW, settings=Settings()) is None
+
+
+def test_check_active_trades_structural_invalidation_call() -> None:
+    active = {"NIFTY": _trade(direction="CALL", structural_invalidation_level=24478.0)}
+    results = {"NIFTY": _result_with_ltp_and_premium(ltp=24400.0, security_id=None, premium=None)}
+    tracker = LifecycleTracker()
+    resolved = run_engine._check_active_trades(active, results, tracker, now=NOW, settings=Settings())
+    assert resolved is True
+    assert "NIFTY" not in active
+    tracked = tracker.get(_trade().key)
+    assert tracked is not None
+    assert tracked.state is LifecycleState.INVALIDATED
+
+
+def test_check_active_trades_premium_stop_hit() -> None:
+    active = {"NIFTY": _trade(stop_loss=90.0)}
+    results = {"NIFTY": _result_with_ltp_and_premium(ltp=24600.0, security_id="CE1", premium=85.0)}
+    tracker = LifecycleTracker()
+    resolved = run_engine._check_active_trades(active, results, tracker, now=NOW, settings=Settings())
+    assert resolved is True
+    assert "NIFTY" not in active
+
+
+def test_check_active_trades_target_hit() -> None:
+    active = {"NIFTY": _trade(take_profit=170.0)}
+    results = {"NIFTY": _result_with_ltp_and_premium(ltp=24700.0, security_id="CE1", premium=180.0)}
+    tracker = LifecycleTracker()
+    resolved = run_engine._check_active_trades(active, results, tracker, now=NOW, settings=Settings())
+    assert resolved is True
+    assert "NIFTY" not in active
+    tracked = tracker.get(_trade().key)
+    assert tracked is not None
+    assert tracked.state is LifecycleState.TARGET
+
+
+def test_check_active_trades_no_hit_keeps_monitoring() -> None:
+    active = {"NIFTY": _trade()}
+    results = {"NIFTY": _result_with_ltp_and_premium(ltp=24600.0, security_id="CE1", premium=125.0)}
+    tracker = LifecycleTracker()
+    resolved = run_engine._check_active_trades(active, results, tracker, now=NOW, settings=Settings())
+    assert resolved is False
+    assert "NIFTY" in active
+
+
+class _SequenceStubRuntime:
+    def __init__(self, sequence: list[CycleResult]) -> None:
+        self._sequence = sequence
+        self._i = 0
+
+    def run_cycle(self, underlying: str, *, now: object = None) -> CycleResult:
+        result = self._sequence[min(self._i, len(self._sequence) - 1)]
+        self._i += 1
+        return result
+
+
+def test_run_live_end_to_end_registers_then_reports_target_hit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    tick1 = CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), _trade_ready_signal(), "x")
+    tick2 = _result_with_ltp_and_premium(ltp=24700.0, security_id="CE1", premium=180.0)
+
+    runtime = _SequenceStubRuntime([tick1, tick2])
+    call_count = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_engine.time_module, "sleep", fake_sleep)
+    exit_code = run_engine._run_live(runtime, ("NIFTY",), 0.01, settings=Settings())
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "now monitoring active trade" in out
+    assert "TARGET HIT" in out

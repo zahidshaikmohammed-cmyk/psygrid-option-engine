@@ -17,14 +17,16 @@ from __future__ import annotations
 import argparse
 import sys
 import time as time_module
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from psygrid_option_engine.api.runtime import CycleResult, EngineRuntime
 from psygrid_option_engine.authorization.tiers import TIER_LABELS, Tier
-from psygrid_option_engine.config.settings import get_settings
+from psygrid_option_engine.config.settings import Settings, get_settings
+from psygrid_option_engine.data.snapshot_builder import build_market_snapshot
 from psygrid_option_engine.signals.lifecycle import LifecycleTracker
-from psygrid_option_engine.signals.schema import Signal
+from psygrid_option_engine.signals.schema import Signal, TradeReadySignal
 
 IST = ZoneInfo("Asia/Kolkata")
 UNDERLYINGS = ("NIFTY", "BANKNIFTY")
@@ -159,8 +161,120 @@ def _lifecycle_key(underlying: str, signal: Signal) -> str:
     return f"{underlying}:NONE"
 
 
-def _run_live(runtime: EngineRuntime, underlyings: tuple[str, ...], interval: float) -> int:
+@dataclass
+class ActiveTrade:
+    """A TRADE_READY signal being monitored tick-to-tick in --live mode for
+    structural invalidation or a premium SL/TP hit. This is intentionally
+    kept out of `api/decision.py` (which stays a pure, stateless
+    MarketSnapshot -> Signal function per brief section 32) - lifecycle
+    monitoring is live-loop bookkeeping, not part of the deterministic
+    decision core.
+    """
+
+    key: str
+    underlying: str
+    direction: str
+    security_id: str
+    entry: float
+    stop_loss: float
+    take_profit: float
+    structural_invalidation_level: float
+    triggered_at: datetime
+
+
+def _current_premium(result: CycleResult, security_id: str, *, as_of: datetime, settings: Settings) -> float | None:
+    """Looks up a specific contract's current LTP from this tick's already-
+    fetched raw bundle - no extra network call, just re-deriving the
+    canonical snapshot from data already on hand."""
+    if result.bundle is None:
+        return None
+    snapshot = build_market_snapshot(result.bundle, as_of=as_of, settings=settings)
+    if snapshot.options is None:
+        return None
+    for leg in snapshot.options.legs:
+        if leg.security_id == security_id and leg.ltp.available:
+            return leg.ltp.value
+    return None
+
+
+def _register_new_active_trades(
+    active_trades: dict[str, ActiveTrade], results: dict[str, CycleResult], now: datetime
+) -> None:
+    for underlying, result in results.items():
+        if underlying in active_trades:
+            continue  # already monitoring a trade for this underlying to conclusion
+        signal = result.signal
+        if not isinstance(signal, TradeReadySignal):
+            continue
+        active_trades[underlying] = ActiveTrade(
+            key=_lifecycle_key(underlying, signal),
+            underlying=underlying,
+            direction=signal.direction,
+            security_id=signal.contract.security_id,
+            entry=signal.execution.entry,
+            stop_loss=signal.execution.stop_loss,
+            take_profit=signal.execution.take_profit,
+            structural_invalidation_level=signal.execution.underlying_invalidation_level,
+            triggered_at=now,
+        )
+        print(f"[{underlying}] now monitoring active trade: {signal.contract.symbol} "
+              f"entry={signal.execution.entry:.2f} sl={signal.execution.stop_loss:.2f} "
+              f"tp={signal.execution.take_profit:.2f}")
+
+
+def _check_active_trades(
+    active_trades: dict[str, ActiveTrade],
+    results: dict[str, CycleResult],
+    tracker: LifecycleTracker,
+    *,
+    now: datetime,
+    settings: Settings,
+) -> bool:
+    """Checks every currently-monitored trade against this tick's fresh
+    data for a structural-invalidation or premium SL/TP hit. Returns True
+    if anything resolved (so the caller knows to print a full report)."""
+    resolved = False
+    for underlying in list(active_trades):
+        trade = active_trades[underlying]
+        result = results.get(underlying)
+        if result is None or result.signal is None:
+            continue
+
+        underlying_ltp = result.signal.market_state.get("ltp")
+        structural_hit = False
+        if underlying_ltp is not None:
+            structural_hit = (
+                underlying_ltp <= trade.structural_invalidation_level
+                if trade.direction == "CALL"
+                else underlying_ltp >= trade.structural_invalidation_level
+            )
+
+        premium = _current_premium(result, trade.security_id, as_of=now, settings=settings)
+        stop_hit = premium is not None and premium <= trade.stop_loss
+        target_hit = premium is not None and premium >= trade.take_profit
+
+        if structural_hit or stop_hit:
+            reason = "structural invalidation" if structural_hit else "premium stop hit"
+            premium_note = f", premium {premium:.2f}" if premium is not None else ""
+            print(f"[{underlying}] TRADE INVALIDATED ({reason}){premium_note} - {trade.security_id}")
+            tracker.update(key=trade.key, tier=0, as_of=now, invalidated=True)
+            del active_trades[underlying]
+            resolved = True
+        elif target_hit:
+            print(f"[{underlying}] TARGET HIT - {trade.security_id} @ premium {premium:.2f}")
+            tracker.update(key=trade.key, tier=0, as_of=now, targeted=True)
+            del active_trades[underlying]
+            resolved = True
+
+    return resolved
+
+
+def _run_live(
+    runtime: EngineRuntime, underlyings: tuple[str, ...], interval: float, *, settings: Settings | None = None
+) -> int:
+    settings = settings or get_settings()
     tracker = LifecycleTracker()
+    active_trades: dict[str, ActiveTrade] = {}
     print(f"Live mode: refreshing every {interval:.0f}s. Signal-only - this process never places orders.")
     print("Press Ctrl+C to stop.\n")
 
@@ -169,7 +283,10 @@ def _run_live(runtime: EngineRuntime, underlyings: tuple[str, ...], interval: fl
             now = datetime.now(UTC)
             results = {u: runtime.run_cycle(u, now=now) for u in underlyings}
 
-            changed = False
+            trade_resolved = _check_active_trades(active_trades, results, tracker, now=now, settings=settings)
+            _register_new_active_trades(active_trades, results, now)
+
+            changed = trade_resolved
             for u, result in results.items():
                 if result.signal is None:
                     continue
@@ -188,7 +305,8 @@ def _run_live(runtime: EngineRuntime, underlyings: tuple[str, ...], interval: fl
                 if best is not None:
                     print(_format_best_opportunity(best))
             else:
-                print(f"[{now.astimezone(IST).strftime('%H:%M:%S')} IST] no change.")
+                status = " | ".join(f"{u} ACTIVE" for u in active_trades) or "no change"
+                print(f"[{now.astimezone(IST).strftime('%H:%M:%S')} IST] {status}.")
 
             time_module.sleep(interval)
     except KeyboardInterrupt:
@@ -215,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with EngineRuntime(settings) as runtime:
         if args.live:
-            return _run_live(runtime, underlyings, interval)
+            return _run_live(runtime, underlyings, interval, settings=settings)
         return _run_once(runtime, underlyings)
 
 
