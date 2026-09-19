@@ -40,8 +40,10 @@ canonical snapshot shape.
 
 ## Next steps (Phase 3+)
 
-1. Run `scripts/probe_upstream.py` against production and commit the
-   captured samples under `tests/fixtures/upstream_samples/`.
+1. **In progress**: run `scripts/probe_upstream.py` against production
+   from the Oracle host (see "Oracle probe procedure" in
+   `docs/ENDPOINTS.md`) and hand back the resulting
+   `artifacts/production_endpoint_samples.json`.
 2. Reconcile `data/models.py` against the real payloads; adjust
    `docs/ENDPOINTS.md`.
 3. Build `domain/snapshot.py` (`MarketSnapshot`) and `market/aggregation.py`

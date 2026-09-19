@@ -25,7 +25,120 @@ Consequences of this, by design:
    `scripts/probe_upstream.py` (added in this phase) and commit the
    captured sample payloads** so the models can be corrected against
    ground truth rather than assumption. Until then, treat every field name
-   below as "best guess, pending confirmation."
+   below as "best guess, pending confirmation." See "Oracle probe
+   procedure" below for the exact steps.
+
+## Oracle probe procedure
+
+Run this from the Oracle host that actually runs the PSYGRID upstream
+service (SSH access, not this sandbox). It performs read-only `GET`
+requests only — it never writes to, deploys to, or modifies the upstream
+service in any way.
+
+### Step 0 (optional, read-only) — look for endpoints not already known
+
+`scripts/probe_upstream.py` automatically probes every endpoint currently
+registered in `psygrid_option_engine/data/endpoints.py`, which covers all
+15 endpoints listed in the brief plus `/public/live.json`. It does **not**
+know the `/public/live-*.json` variant names or which `/public/stock/
+{symbol}.json` symbols exist — those need to be discovered once, from the
+box itself, without guessing:
+
+```bash
+# Find what's actually listening on :10000 (read-only)
+sudo ss -ltnp | grep :10000        # or: sudo lsof -i :10000
+
+# If it's an application process, find its working directory (read-only)
+ps -fp <PID_FROM_ABOVE>
+readlink -f /proc/<PID_FROM_ABOVE>/cwd
+
+# If that directory (or wherever it serves static files from) is
+# filesystem-readable, list it — this reveals every real endpoint
+# filename directly, more reliably than guessing:
+ls -la <served_dir>/public/
+
+# If it's an application with route definitions, grep them (read-only):
+grep -rniE "public/|@app\.(get|route)|router\.(get)" <app_dir> --include=*.py
+grep -rniE "public/|app\.get\(|router\.get\(" <app_dir> --include=*.js
+
+# Also worth a quick, safe curl in case a manifest/listing exists:
+curl -s http://127.0.0.1:10000/public/ | head -c 500
+curl -s http://127.0.0.1:10000/public/index.json | head -c 500
+```
+
+Whatever extra filenames this turns up (e.g. `live-nifty.json`, or a
+symbol list to build `stock/{symbol}.json` paths from), pass them to the
+probe via repeated `--extra /public/<name>.json` flags in Step 2.
+
+### Step 1 — get this repo and its base dependencies onto the box
+
+```bash
+git clone https://github.com/zahidshaikmohammed-cmyk/psygrid-option-engine.git
+cd psygrid-option-engine
+git fetch origin claude/friendly-hamilton-ghgt6v
+git checkout claude/friendly-hamilton-ghgt6v
+git pull origin claude/friendly-hamilton-ghgt6v
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .   # base deps only (httpx/pydantic/tenacity); no dev/test extras needed
+```
+
+(If the repo is already checked out on the box, skip `git clone` and just
+`git pull` inside the existing checkout.)
+
+### Step 2 — run the probe
+
+```bash
+python scripts/probe_upstream.py \
+  --base-url http://127.0.0.1:10000 \
+  --out artifacts/production_endpoint_samples.json \
+  --timeout 10 \
+  --retries 1
+  # add --extra /public/whatever.json (repeatable) for anything found in Step 0
+```
+
+`--base-url http://127.0.0.1:10000` is preferred over the public IP since
+the script is running on the same host — it avoids any external
+routing/firewall variables. Swap in `http://140.245.226.102:10000` if
+`127.0.0.1` doesn't reach the service for some local reason.
+
+Every line printed should say `OK`; a `FAIL` line names a path that
+returned an error, a non-2xx status, or invalid JSON — expected for
+endpoints that don't actually exist (e.g. speculative `--extra` guesses),
+worth a second look for endpoints from the brief's list of 15.
+
+### Step 3 — verify redaction before doing anything else with the file
+
+The script redacts by key name (`*key*`, `*secret*`, `*token*`,
+`*password*`, `*credential*`, `*auth*`, `dhan*`, `fred*api*`) and by value
+shape (long opaque token-like strings, `Bearer `/`sk-`/`xox` prefixes),
+but verify it yourself before this file leaves the box:
+
+```bash
+grep -inE '"(api[_-]?key|secret|token|password|passwd|credential)"' \
+  artifacts/production_endpoint_samples.json | grep -v REDACTED
+# This must print NOTHING. If it prints anything, STOP — do not transfer
+# the file — and tell me which field it flagged so the redaction rules
+# (or the endpoint contract itself) can be fixed first.
+```
+
+### Step 4 — get the artifact to me (pick one)
+
+```bash
+# (a) scp to your local machine, then hand me the file directly
+scp <oracle-user>@<oracle-host>:~/psygrid-option-engine/artifacts/production_endpoint_samples.json .
+
+# (b) OR, if this checkout can push to the branch, commit and push it here
+#     and tell me you did so:
+git add artifacts/production_endpoint_samples.json
+git commit -m "Add production endpoint samples captured via probe_upstream.py"
+git push origin claude/friendly-hamilton-ghgt6v
+```
+
+Once I have the artifact, I'll reconcile `docs/ENDPOINTS.md` and
+`psygrid_option_engine/data/models.py` against the real payloads before
+starting Phase 3.
 
 ## Endpoint inventory (as given in the brief)
 
