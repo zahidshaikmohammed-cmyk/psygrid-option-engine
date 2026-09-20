@@ -19,7 +19,7 @@ from psygrid_option_engine.config.settings import get_settings
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="psygrid-option-engine")
-    parser.add_argument("--underlying", default="NIFTY", choices=["NIFTY", "BANKNIFTY"])
+    parser.add_argument("--underlying", default="NIFTY", choices=["NIFTY", "BANKNIFTY", "SENSEX"])
     args = parser.parse_args(argv)
 
     settings = get_settings()

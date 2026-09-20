@@ -64,8 +64,10 @@ def test_redact_by_value_shape_under_innocuous_key() -> None:
     [
         ("/public/nifty.json", "underlying"),
         ("/public/banknifty.json", "underlying"),
+        ("/public/sensex.json", "underlying"),
         ("/public/nifty-options.json", "options"),
         ("/public/banknifty-depth.json", "depth"),
+        ("/public/sensex-depth.json", "depth"),
         ("/public/nifty-indicators.json", "indicators"),
         ("/public/nifty-futures.json", "futures"),
         ("/public/market-breadth.json", "market_breadth"),
@@ -74,6 +76,19 @@ def test_redact_by_value_shape_under_innocuous_key() -> None:
 )
 def test_logical_guess(path: str, expected: str) -> None:
     assert probe_upstream._logical_guess(path) == expected
+
+
+def test_registry_paths_includes_sensex() -> None:
+    # Derived from data/endpoints.py's UNDERLYING_SLUGS (single source of
+    # truth) rather than a separately-hardcoded underlying list here - a
+    # previously-hardcoded copy of this list is exactly what caused
+    # SENSEX to be silently skipped until this was fixed.
+    paths = probe_upstream._registry_paths()
+    assert paths["underlying_sensex"] == "/public/sensex.json"
+    assert paths["options_sensex"] == "/public/sensex-options.json"
+    assert paths["depth_sensex"] == "/public/sensex-depth.json"
+    assert paths["indicators_sensex"] == "/public/sensex-indicators.json"
+    assert paths["futures_sensex"] == "/public/sensex-futures.json"
 
 
 def test_redact_headers_allowlist() -> None:

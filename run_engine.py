@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """PSYGRID Option Engine - CLI entrypoint (brief section 35).
 
-    python run_engine.py --once [--underlying NIFTY|BANKNIFTY|BOTH]
+    python run_engine.py --once [--underlying NIFTY|BANKNIFTY|SENSEX|ALL]
     python run_engine.py --live [--interval SECONDS]
 
 Signal-only. This process NEVER places a broker order - see docs/SAFETY.md.
 `--once` runs a single complete intelligence cycle against production data
 and prints a human-readable report plus the current best opportunity
-across both underlyings (or just the one requested). `--live` repeats
-that cycle on an interval, printing only when something actually changed
-(via `signals/lifecycle.py`) so it doesn't spam an unchanged setup.
+across all supported underlyings (or just the one requested). `--live`
+repeats that cycle on an interval, printing only when something actually
+changed (via `signals/lifecycle.py`) so it doesn't spam an unchanged setup.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from psygrid_option_engine.signals.lifecycle import LifecycleTracker
 from psygrid_option_engine.signals.schema import Signal, TradeReadySignal
 
 IST = ZoneInfo("Asia/Kolkata")
-UNDERLYINGS = ("NIFTY", "BANKNIFTY")
+UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
 _BAR = "=" * 60
 
 
@@ -382,14 +382,14 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Run one complete cycle and exit (default).")
     mode.add_argument("--live", action="store_true", help="Continuously refresh and report.")
-    parser.add_argument("--underlying", choices=["NIFTY", "BANKNIFTY", "BOTH"], default="BOTH")
+    parser.add_argument("--underlying", choices=["NIFTY", "BANKNIFTY", "SENSEX", "ALL"], default="ALL")
     parser.add_argument(
         "--interval", type=float, default=None, help="Seconds between cycles in --live mode."
     )
     args = parser.parse_args(argv)
 
     settings = get_settings()
-    underlyings = UNDERLYINGS if args.underlying == "BOTH" else (args.underlying,)
+    underlyings = UNDERLYINGS if args.underlying == "ALL" else (args.underlying,)
     interval = args.interval or settings.decision_interval_seconds
 
     with EngineRuntime(settings) as runtime:

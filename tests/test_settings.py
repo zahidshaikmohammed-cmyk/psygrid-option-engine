@@ -34,4 +34,4 @@ def test_endpoint_criticality_unregistered_raises() -> None:
 
 
 def test_supported_underlyings_default() -> None:
-    assert Settings().supported_underlyings == ("NIFTY", "BANKNIFTY")
+    assert Settings().supported_underlyings == ("NIFTY", "BANKNIFTY", "SENSEX")

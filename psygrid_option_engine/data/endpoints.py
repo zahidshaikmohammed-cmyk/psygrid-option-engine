@@ -12,11 +12,23 @@ from psygrid_option_engine.config.settings import EndpointCriticality, endpoint_
 
 
 class EndpointScope(StrEnum):
-    PER_UNDERLYING = "PER_UNDERLYING"  # one instance per NIFTY/BANKNIFTY
+    PER_UNDERLYING = "PER_UNDERLYING"  # one instance per NIFTY/BANKNIFTY/SENSEX
     GLOBAL = "GLOBAL"  # fetched once, shared across underlyings
 
 
-_UNDERLYING_SLUG = {"NIFTY": "nifty", "BANKNIFTY": "banknifty"}
+# SENSEX paths (/public/sensex.json, -options/-depth/-indicators/-futures)
+# confirmed live by the user directly (2026-09-20) - same path convention as
+# NIFTY/BANKNIFTY, so the same {slug}-based templates below apply unchanged.
+# The payload *shape* for SENSEX has not been probed/verified yet (unlike
+# NIFTY/BANKNIFTY, corrected against a real captured sample) - see
+# docs/ENDPOINTS.md.
+#
+# Public (no leading underscore) so scripts/probe_upstream.py can derive its
+# own per-underlying path list from this instead of maintaining a second,
+# separately-hardcoded copy - exactly that kind of drift (two lists meant to
+# stay in sync but didn't) already caused a real bug once in this codebase
+# (see data/validation.py's LIST_CONTAINER_KEYS docstring).
+UNDERLYING_SLUGS = {"NIFTY": "nifty", "BANKNIFTY": "banknifty", "SENSEX": "sensex"}
 
 
 @dataclass(frozen=True)
@@ -30,7 +42,7 @@ class Endpoint:
         if self.scope is EndpointScope.PER_UNDERLYING:
             if underlying is None:
                 raise ValueError(f"{self.logical_name} requires an underlying")
-            slug = _UNDERLYING_SLUG.get(underlying)
+            slug = UNDERLYING_SLUGS.get(underlying)
             if slug is None:
                 raise ValueError(f"Unsupported underlying {underlying!r}")
             return self.path_template.format(slug=slug)

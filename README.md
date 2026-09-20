@@ -77,7 +77,7 @@ See [`docs/CONFIG.md`](docs/CONFIG.md) for every variable.
 ## Run
 
 ```bash
-python run_engine.py --once [--underlying NIFTY|BANKNIFTY|BOTH]
+python run_engine.py --once [--underlying NIFTY|BANKNIFTY|SENSEX|ALL]
 python run_engine.py --live [--interval SECONDS]
 ```
 

@@ -15,6 +15,11 @@ from psygrid_option_engine.data.endpoints import ENDPOINT_REGISTRY, stock_endpoi
         ("depth", "NIFTY", "/public/nifty-depth.json"),
         ("indicators", "BANKNIFTY", "/public/banknifty-indicators.json"),
         ("futures", "NIFTY", "/public/nifty-futures.json"),
+        ("underlying", "SENSEX", "/public/sensex.json"),
+        ("options", "SENSEX", "/public/sensex-options.json"),
+        ("depth", "SENSEX", "/public/sensex-depth.json"),
+        ("indicators", "SENSEX", "/public/sensex-indicators.json"),
+        ("futures", "SENSEX", "/public/sensex-futures.json"),
     ],
 )
 def test_per_underlying_paths(logical_name: str, underlying: str, expected: str) -> None:
@@ -43,7 +48,7 @@ def test_per_underlying_endpoint_requires_underlying() -> None:
 
 def test_unsupported_underlying_rejected() -> None:
     with pytest.raises(ValueError):
-        ENDPOINT_REGISTRY["underlying"].path("SENSEX")
+        ENDPOINT_REGISTRY["underlying"].path("MIDCPNIFTY")
 
 
 def test_stock_endpoint_path() -> None:

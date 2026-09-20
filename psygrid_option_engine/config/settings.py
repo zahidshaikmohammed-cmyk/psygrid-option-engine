@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     entry_cutoff: str = Field(default="15:00")
     late_session_start: str = Field(default="14:30")
 
-    supported_underlyings: tuple[str, ...] = ("NIFTY", "BANKNIFTY")
+    supported_underlyings: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
 
     @field_validator("base_url")
     @classmethod

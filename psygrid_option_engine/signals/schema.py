@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 SCHEMA_VERSION: Literal["1.0"] = "1.0"
 ENGINE_NAME: Literal["PSYGRID_OPTION_ENGINE"] = "PSYGRID_OPTION_ENGINE"
 
-Underlying = Literal["NIFTY", "BANKNIFTY"]
+Underlying = Literal["NIFTY", "BANKNIFTY", "SENSEX"]
 Direction = Literal["CALL", "PUT"]
 OptionType = Literal["CE", "PE"]
 SourceStatusLiteral = Literal["OK", "STALE", "MISSING", "ERROR"]

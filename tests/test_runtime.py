@@ -28,7 +28,7 @@ def _healthy_handler(request: httpx.Request) -> httpx.Response:
         )
     if path.endswith("-depth.json"):
         return httpx.Response(200, json={"contracts": []})
-    if path in ("/public/nifty.json", "/public/banknifty.json"):
+    if path in ("/public/nifty.json", "/public/banknifty.json", "/public/sensex.json"):
         return httpx.Response(200, json={"ltp": 100, "timestamp": "2026-09-18T05:00:00Z"})
     return httpx.Response(200, json={})
 
@@ -66,6 +66,18 @@ def test_market_open_with_healthy_data_reaches_a_decision(fast_settings: Setting
     assert result.signal.reasons
     assert result.data_quality is not None
     assert result.data_quality.critical_endpoints_ok is True
+    runtime.close()
+
+
+def test_sensex_is_a_supported_underlying(fast_settings: Settings) -> None:
+    # SENSEX endpoint paths were confirmed live directly by the user
+    # (2026-09-20) - the engine must accept it as a supported underlying
+    # (never raise ConfigurationError) even though the real payload shape
+    # is unverified (see docs/ENDPOINTS.md).
+    runtime = _make_runtime(fast_settings, _healthy_handler)
+    result = runtime.run_cycle("SENSEX", now=WITHIN_SESSION_UTC)
+    assert result.state in (EngineState.NO_TRADE, EngineState.TRADE_READY)
+    assert result.underlying == "SENSEX"
     runtime.close()
 
 
@@ -110,7 +122,7 @@ def test_critical_endpoint_failure_produces_no_trade_with_reasons(fast_settings:
 def test_unsupported_underlying_raises_configuration_error(fast_settings: Settings) -> None:
     runtime = _make_runtime(fast_settings, _healthy_handler)
     with pytest.raises(ConfigurationError):
-        runtime.run_cycle("SENSEX", now=WITHIN_SESSION_UTC)
+        runtime.run_cycle("MIDCPNIFTY", now=WITHIN_SESSION_UTC)
     runtime.close()
 
 

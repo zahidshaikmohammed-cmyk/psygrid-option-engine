@@ -43,7 +43,7 @@ from typing import Any
 
 import httpx
 
-from psygrid_option_engine.data.endpoints import ENDPOINT_REGISTRY, EndpointScope
+from psygrid_option_engine.data.endpoints import ENDPOINT_REGISTRY, UNDERLYING_SLUGS, EndpointScope
 from psygrid_option_engine.data.validation import extract_timestamp, validate_structure
 
 USER_AGENT = "psygrid-option-engine-probe/1.0 (+read-only contract verification)"
@@ -123,15 +123,20 @@ def _redact_headers(headers: httpx.Headers) -> dict[str, str]:
 
 
 def _registry_paths() -> dict[str, str]:
-    """Every endpoint currently registered in data/endpoints.py, for both
-    underlyings where applicable. This already covers every endpoint named
-    in docs/ENDPOINTS.md plus `live.json` (registered as GLOBAL/OPTIONAL)."""
+    """Every endpoint currently registered in data/endpoints.py, for every
+    supported underlying. Derived from data/endpoints.py's own
+    UNDERLYING_SLUGS rather than a second, separately-maintained list of
+    underlyings here - two lists meant to stay in sync is exactly what
+    already caused a real bug once in this codebase (see
+    data/validation.py's LIST_CONTAINER_KEYS docstring). This already
+    covers every endpoint named in docs/ENDPOINTS.md plus `live.json`
+    (registered as GLOBAL/OPTIONAL)."""
     paths: dict[str, str] = {}
     for endpoint in ENDPOINT_REGISTRY.values():
         if endpoint.scope is EndpointScope.GLOBAL:
             paths[endpoint.logical_name] = endpoint.path()
         else:
-            for slug, underlying in (("nifty", "NIFTY"), ("banknifty", "BANKNIFTY")):
+            for underlying, slug in UNDERLYING_SLUGS.items():
                 paths[f"{endpoint.logical_name}_{slug}"] = endpoint.path(underlying)
     return paths
 
@@ -231,12 +236,15 @@ def _classify_market_status(body: Any) -> str | None:
 
 def _logical_guess(path: str) -> str:
     """Best-effort mapping from a URL path back to a logical_name so
-    validate_structure can apply the right (best-guess) shape check."""
+    validate_structure can apply the right (best-guess) shape check.
+    Underlying slugs come from data/endpoints.py's UNDERLYING_SLUGS rather
+    than a separately-hardcoded list, for the same reason _registry_paths
+    does."""
     name = path.rsplit("/", 1)[-1].removesuffix(".json")
     for logical in ("options", "depth", "indicators", "futures"):
         if name.endswith(f"-{logical}"):
             return logical
-    if name in ("nifty", "banknifty"):
+    if name in UNDERLYING_SLUGS.values():
         return "underlying"
     return name.replace("-", "_")
 

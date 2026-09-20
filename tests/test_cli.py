@@ -72,4 +72,4 @@ def test_cli_prints_no_trade_signal(monkeypatch: pytest.MonkeyPatch, capsys: pyt
 
 def test_cli_rejects_unsupported_underlying() -> None:
     with pytest.raises(SystemExit):
-        cli.main(["--underlying", "SENSEX"])
+        cli.main(["--underlying", "MIDCPNIFTY"])

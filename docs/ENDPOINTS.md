@@ -38,6 +38,37 @@ concrete bugs this fixed (options chain parsing to zero legs, depth
 parsing to zero entries, global_context reading metadata keys instead of
 the real nested series, market_breadth's advancing/declining field names).
 
+## SENSEX — paths confirmed live, payload shape not yet verified (2026-09-20)
+
+The user directly confirmed (2026-09-20) that PSYGRID also serves SENSEX
+on the identical path convention: `/public/sensex.json`, `-options.json`,
+`-depth.json`, `-indicators.json`, `-futures.json`. `SENSEX` is now in
+`config/settings.py::supported_underlyings` and `data/endpoints.py`'s slug
+map, so the engine will fetch and attempt to parse it using the exact
+same alias tables verified against NIFTY/BANKNIFTY.
+
+**This is a reasonable inference, not a verified fact**: PSYGRID is one
+service with one consistent path/adapter convention, and NIFTY/BANKNIFTY
+were themselves confirmed to share an identical schema — so SENSEX very
+likely does too. But no real SENSEX sample has been captured or run
+through the adapter yet. Until one is, treat SENSEX exactly like
+`futures`/`indicators`/`rbi_news` above: the code path exists and
+degrades safely (missing/unparseable fields become `SourcedField.missing`
+or an empty option chain, never a crash or a fabricated value — same
+design rule as everywhere else in this adapter), but do not treat a live
+SENSEX signal as contract-verified. To close this gap, run:
+
+```bash
+python scripts/probe_upstream.py --base-url http://127.0.0.1:10000 \
+  --out artifacts/sensex_probe_samples.json \
+  --extra /public/sensex.json --extra /public/sensex-options.json \
+  --extra /public/sensex-depth.json --extra /public/sensex-indicators.json \
+  --extra /public/sensex-futures.json
+```
+
+and hand back the (redacted) artifact — same "Oracle probe procedure"
+above, just with these extra paths.
+
 The remaining unverified endpoints still follow the same design
 discipline that made this correction a localized fix rather than a
 rewrite:
@@ -174,14 +205,19 @@ starting Phase 3.
 |---|---|---|
 | `/public/nifty.json` | NIFTY underlying index snapshot (LTP/OHLC) | intraday, frequent |
 | `/public/banknifty.json` | BANKNIFTY underlying index snapshot | intraday, frequent |
+| `/public/sensex.json` | SENSEX underlying index snapshot | intraday, frequent |
 | `/public/nifty-options.json` | NIFTY option chain | intraday, frequent |
 | `/public/banknifty-options.json` | BANKNIFTY option chain | intraday, frequent |
+| `/public/sensex-options.json` | SENSEX option chain | intraday, frequent |
 | `/public/nifty-depth.json` | NIFTY market depth (underlying/futures/options) | intraday, frequent |
 | `/public/banknifty-depth.json` | BANKNIFTY market depth | intraday, frequent |
+| `/public/sensex-depth.json` | SENSEX market depth | intraday, frequent |
 | `/public/nifty-indicators.json` | Pre-computed indicators for NIFTY | intraday |
 | `/public/banknifty-indicators.json` | Pre-computed indicators for BANKNIFTY | intraday |
+| `/public/sensex-indicators.json` | Pre-computed indicators for SENSEX | intraday |
 | `/public/nifty-futures.json` | NIFTY futures (nearest/other expiries) | intraday |
 | `/public/banknifty-futures.json` | BANKNIFTY futures | intraday |
+| `/public/sensex-futures.json` | SENSEX futures | intraday |
 | `/public/market-breadth.json` | Advance/decline and breadth stats | intraday |
 | `/public/sectors.json` | Sector-level performance | intraday |
 | `/public/global-context.json` | Delayed macro series (S&P 500, VIX, US10Y, WTI, USDINR) | delayed / periodic |
