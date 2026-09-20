@@ -103,7 +103,15 @@ def select_contract(
 
     for leg in legs:
         instrument_depth: InstrumentDepth | None = depth.by_security_id.get(leg.security_id) if depth else None
-        depth_metrics = compute_depth_metrics(instrument_depth) if instrument_depth else _fallback_depth_from_leg(leg)
+        # Real 20-level depth is preferred, but only when it actually has
+        # at least one genuinely-quoted level - an InstrumentDepth object
+        # can exist with empty bids/asks (e.g. an all-zero-price ladder
+        # already filtered out in data/snapshot_builder.py), in which case
+        # it carries no more information than "no real depth" and the
+        # option chain's own bid/ask is a strictly better source than
+        # reporting UNKNOWN liquidity outright.
+        has_real_levels = instrument_depth is not None and (instrument_depth.bids or instrument_depth.asks)
+        depth_metrics = compute_depth_metrics(instrument_depth) if has_real_levels else _fallback_depth_from_leg(leg)
 
         rejection = _hard_reject_reason(
             leg, depth_metrics, target_delta=target_delta, delta_band=delta_band,
@@ -166,6 +174,8 @@ def _hard_reject_reason(
 ) -> str | None:
     if not leg.security_id:
         return "missing security_id - cannot be traded"
+    if not leg.ltp.available or leg.ltp.value is None or leg.ltp.value <= 0:
+        return "missing or non-positive LTP - cannot be traded"
     if not leg.oi.available or leg.oi.value is None or leg.oi.value < min_oi:
         return f"open interest below minimum ({min_oi:g})"
     if min_volume > 0 and (not leg.volume.available or (leg.volume.value or 0) < min_volume):

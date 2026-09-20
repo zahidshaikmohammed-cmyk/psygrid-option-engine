@@ -133,6 +133,124 @@ def test_depth_dict_keyed_by_security_id() -> None:
     assert inst.asks[0].quantity == 50
 
 
+def test_depth_real_production_shape_contracts_container() -> None:
+    # Real shape verified against artifacts/production_endpoint_samples.json
+    # (2026-09-19): container key "contracts", singular "bid"/"ask" keys,
+    # each holding a fixed-length level array.
+    bundle = _minimal_bundle(
+        depth=_result(
+            "depth",
+            EndpointCriticality.CRITICAL,
+            {
+                "contracts": [
+                    {
+                        "security_id": "56995",
+                        "strike": 23350.0,
+                        "option_type": "CE",
+                        "bid": [{"level": 1, "price": 88.05, "quantity": 260, "orders": 3}],
+                        "ask": [{"level": 1, "price": 88.55, "quantity": 260, "orders": 2}],
+                    }
+                ]
+            },
+        )
+    )
+    snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())
+    assert snap.depth is not None
+    inst = snap.depth.by_security_id["56995"]
+    assert inst.bids[0].price == 88.05
+    assert inst.asks[0].price == 88.55
+
+
+def test_depth_all_zero_price_levels_filtered_to_empty_not_fake_zero() -> None:
+    # A real depth payload sends a fixed-length 20-slot array even when
+    # nothing is quoted (e.g. market closed): {"price": 0.0, "quantity": 0}
+    # per slot. These must not survive as fake best_bid=0.0/best_ask=0.0.
+    bundle = _minimal_bundle(
+        depth=_result(
+            "depth",
+            EndpointCriticality.CRITICAL,
+            {
+                "contracts": [
+                    {
+                        "security_id": "56995",
+                        "bid": [{"level": i, "price": 0.0, "quantity": 0, "orders": 0} for i in range(1, 21)],
+                        "ask": [{"level": i, "price": 0.0, "quantity": 0, "orders": 0} for i in range(1, 21)],
+                    }
+                ]
+            },
+        )
+    )
+    snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())
+    assert snap.depth is not None
+    inst = snap.depth.by_security_id["56995"]
+    assert inst.bids == ()
+    assert inst.asks == ()
+
+
+def test_nan_and_infinite_values_treated_as_unavailable() -> None:
+    # Python's json module accepts the non-standard NaN/Infinity literals
+    # by default; a market value can never legitimately be one of these.
+    bundle = _minimal_bundle(
+        underlying=_result(
+            "underlying",
+            EndpointCriticality.CRITICAL,
+            {"symbol": "NIFTY", "ltp": float("nan"), "open": float("inf"), "high": float("-inf")},
+        )
+    )
+    snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())
+    u = snap.underlying_snapshot
+    assert u is not None
+    assert u.ltp.available is False
+    assert u.day_ohlc.open.available is False
+    assert u.day_ohlc.high.available is False
+
+
+def test_duplicate_candle_timestamps_deduped_last_wins() -> None:
+    bundle = _minimal_bundle(
+        underlying=_result(
+            "underlying",
+            EndpointCriticality.CRITICAL,
+            {
+                "symbol": "NIFTY",
+                "ltp": 100,
+                "candles_1m": [
+                    {"timestamp": "2026-09-18T04:58:00Z", "open": 1, "high": 2, "low": 0, "close": 1.0},
+                    {"timestamp": "2026-09-18T04:58:00Z", "open": 1, "high": 2, "low": 0, "close": 1.9},
+                ],
+            },
+        )
+    )
+    snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())
+    from psygrid_option_engine.domain.timeframe import Timeframe
+
+    m1 = snap.underlying_snapshot.candles.get(Timeframe.M1, ())
+    assert len(m1) == 1
+    assert m1[0].close == 1.9  # last occurrence for that timestamp wins
+
+
+def test_out_of_order_candles_sorted_ascending() -> None:
+    bundle = _minimal_bundle(
+        underlying=_result(
+            "underlying",
+            EndpointCriticality.CRITICAL,
+            {
+                "symbol": "NIFTY",
+                "ltp": 100,
+                "candles_1m": [
+                    {"timestamp": "2026-09-18T04:58:00Z", "open": 1, "high": 2, "low": 0, "close": 1.5},
+                    {"timestamp": "2026-09-18T04:56:00Z", "open": 1, "high": 2, "low": 0, "close": 1.1},
+                    {"timestamp": "2026-09-18T04:57:00Z", "open": 1, "high": 2, "low": 0, "close": 1.2},
+                ],
+            },
+        )
+    )
+    snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())
+    from psygrid_option_engine.domain.timeframe import Timeframe
+
+    m1 = snap.underlying_snapshot.candles.get(Timeframe.M1, ())
+    assert [c.start for c in m1] == sorted(c.start for c in m1)
+
+
 def test_candles_filtered_against_as_of_no_lookahead() -> None:
     bundle = _minimal_bundle(
         underlying=_result(

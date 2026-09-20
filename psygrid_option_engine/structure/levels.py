@@ -73,10 +73,16 @@ def compute_session_levels(
 
     current_week_high: float | None = None
     current_week_low: float | None = None
+    # Only genuine multi-day D1 history may be aggregated into a "current
+    # week" range. Today's own M1 candles must NEVER substitute for it -
+    # aggregating a single day's bars as if they were a week's worth of
+    # daily bars would relabel "today's range" as "this week's range",
+    # which is fabrication, not an estimate. If no D1 history exists yet
+    # (the common case for a single live snapshot - see module docstring),
+    # this honestly stays None rather than faking a value.
     d1 = underlying.candles.get(Timeframe.D1, ())
-    base_for_week = d1 if d1 else tuple(today_closed_m1)
-    if base_for_week:
-        weekly = aggregate_weekly(base_for_week, as_of=as_of, session_window=window)
+    if d1:
+        weekly = aggregate_weekly(d1, as_of=as_of, session_window=window)
         iso_year, iso_week, _ = today.isocalendar()
         for wk in weekly:
             wk_year, wk_week, _ = _to_ist_date(wk.start).isocalendar()

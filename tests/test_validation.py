@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -151,6 +152,91 @@ def test_build_data_quality_degraded_on_stale_optional() -> None:
     assert dq.overall == "DEGRADED"
     assert dq.critical_endpoints_ok is True
     assert "indicators" in dq.stale_fields
+
+
+def test_build_data_quality_insufficient_on_stale_critical() -> None:
+    """Production-hardening requirement: a stale critical endpoint must
+    make critical_endpoints_ok False (and overall INSUFFICIENT), not just
+    DEGRADED - a stale critical payload is not safe to decide on."""
+    stale_observed = NOW - timedelta(seconds=1000)
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=NOW,
+        results={
+            "underlying": _result(
+                "underlying", criticality=EndpointCriticality.CRITICAL, observed_at=stale_observed
+            ),
+            "options": _result("options", criticality=EndpointCriticality.CRITICAL, data=[]),
+            "depth": _result("depth", criticality=EndpointCriticality.CRITICAL, data=[]),
+        },
+    )
+    dq = build_data_quality(bundle, settings=Settings(), as_of=NOW)
+    assert dq.overall == "INSUFFICIENT"
+    assert dq.critical_endpoints_ok is False
+    assert "underlying" in dq.stale_fields
+
+
+def test_build_data_quality_insufficient_on_structurally_invalid_critical() -> None:
+    """A critical payload that returned HTTP 200 with parseable JSON but
+    failed the structural shape check must not be treated as healthy."""
+    bad = _result("options", criticality=EndpointCriticality.CRITICAL, data={"foo": "bar"})
+    bad = dataclasses.replace(bad, issues=("no recognizable list container key found",))
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=NOW,
+        results={
+            "underlying": _result("underlying", criticality=EndpointCriticality.CRITICAL),
+            "options": bad,
+            "depth": _result("depth", criticality=EndpointCriticality.CRITICAL, data=[]),
+        },
+    )
+    dq = build_data_quality(bundle, settings=Settings(), as_of=NOW)
+    assert dq.overall == "INSUFFICIENT"
+    assert dq.critical_endpoints_ok is False
+    assert "options" in dq.unavailable_fields
+
+
+def test_build_data_quality_insufficient_on_future_dated_critical() -> None:
+    """A critical payload whose self-reported observation time is AFTER
+    the decision's own as_of is an information-boundary violation and must
+    never be trusted as fresh."""
+    future_observed = NOW + timedelta(seconds=30)
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=NOW,
+        results={
+            "underlying": _result(
+                "underlying", criticality=EndpointCriticality.CRITICAL, observed_at=future_observed
+            ),
+            "options": _result("options", criticality=EndpointCriticality.CRITICAL, data=[]),
+            "depth": _result("depth", criticality=EndpointCriticality.CRITICAL, data=[]),
+        },
+    )
+    dq = build_data_quality(bundle, settings=Settings(), as_of=NOW)
+    assert dq.overall == "INSUFFICIENT"
+    assert dq.critical_endpoints_ok is False
+    assert "underlying" in dq.unavailable_fields
+
+
+def test_build_data_quality_insufficient_on_missing_required_critical_field() -> None:
+    """A critical payload can be a well-formed, fresh, structurally valid
+    fetch and still extract to nothing usable - critical_extraction_ok
+    must catch that even though per-source status looks OK."""
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=NOW,
+        results={
+            "underlying": _result("underlying", criticality=EndpointCriticality.CRITICAL),
+            "options": _result("options", criticality=EndpointCriticality.CRITICAL, data=[]),
+            "depth": _result("depth", criticality=EndpointCriticality.CRITICAL, data=[]),
+        },
+    )
+    dq = build_data_quality(
+        bundle, settings=Settings(), as_of=NOW, critical_extraction_ok={"options": False}
+    )
+    assert dq.overall == "INSUFFICIENT"
+    assert dq.critical_endpoints_ok is False
+    assert "options" in dq.unavailable_fields
 
 
 def test_build_data_quality_degraded_on_missing_optional() -> None:

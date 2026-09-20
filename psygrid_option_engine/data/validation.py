@@ -42,8 +42,29 @@ _TIMESTAMP_KEYS = (
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
-# Plausible container keys for list-shaped payloads nested under a dict.
-_LIST_CONTAINER_KEYS = ("data", "results", "items", "chain", "strikes", "options", "records")
+# Container keys for list-shaped payloads nested under a dict. This is the
+# ONE canonical list - both this module's structural validation and
+# data/snapshot_builder.py's extraction import it, so they can never drift
+# out of sync again. They did once: this module's own copy was missing
+# "contracts", so a real, valid, HTTP-200 depth payload (container key
+# "contracts" - verified against artifacts/production_endpoint_samples.json,
+# 2026-09-19) was flagged with a false "no recognizable list container key
+# found" structural issue even though snapshot_builder.py's separate list
+# already knew about "contracts". "strikes"/"contracts"/"sectors" are
+# verified real (options/depth/sectors payloads respectively); the rest are
+# best-guess fallbacks kept for resilience against other shapes.
+LIST_CONTAINER_KEYS = (
+    "data",
+    "results",
+    "items",
+    "chain",
+    "strikes",
+    "options",
+    "records",
+    "legs",
+    "contracts",
+    "sectors",
+)
 
 # Plausible price-field aliases for an underlying/futures snapshot.
 _PRICE_FIELD_ALIASES = ("ltp", "last_price", "close", "ltp_price", "price", "last")
@@ -139,10 +160,10 @@ def _check_options_shape(payload: Any) -> list[str]:
         return issues
     if isinstance(payload, dict):
         lowered = {str(k).lower(): k for k in payload}
-        if not any(k in lowered for k in _LIST_CONTAINER_KEYS):
+        if not any(k in lowered for k in LIST_CONTAINER_KEYS):
             issues.append(
                 "options payload is an object but no recognizable list "
-                f"container key found (looked for one of {_LIST_CONTAINER_KEYS})"
+                f"container key found (looked for one of {LIST_CONTAINER_KEYS})"
             )
         return issues
     issues.append("expected a JSON array or object for an option chain")
@@ -189,6 +210,20 @@ def assess_source_status(
             status="MISSING" if result.http_status is None else "ERROR",
         )
 
+    if result.issues:
+        # HTTP succeeded and JSON parsed, but the payload doesn't match
+        # even the deliberately-tolerant shape check (e.g. no recognizable
+        # list container for an option chain). A structurally-invalid
+        # critical payload must never be treated as healthy merely because
+        # the fetch itself succeeded.
+        return SourceStatus(
+            fetched_at=result.fetched_at,
+            observed_at=result.observed_at,
+            age_seconds=None,
+            available=True,
+            status="ERROR",
+        )
+
     age_seconds = None
     if result.observed_at is not None:
         age_seconds = (as_of - result.observed_at).total_seconds()
@@ -198,6 +233,13 @@ def assess_source_status(
         # No self-reported timestamp found; fall back to fetch recency so we
         # don't punish a payload merely for not exposing a timestamp field.
         status = "OK"
+    elif age_seconds < 0:
+        # The payload's self-reported observation time is AFTER this
+        # decision's own information boundary (`as_of`) - an information-
+        # boundary violation (docs/ARCHITECTURE.md section 3: a decision at
+        # time t may only use data observed <= t), never a "very fresh"
+        # reading. Must never be silently trusted as current.
+        status = "ERROR"
     elif age_seconds > tolerance_seconds:
         status = "STALE"
     else:
@@ -213,8 +255,23 @@ def assess_source_status(
 
 
 def build_data_quality(
-    bundle: RawFetchBundle, *, settings: Settings, as_of: datetime
+    bundle: RawFetchBundle,
+    *,
+    settings: Settings,
+    as_of: datetime,
+    critical_extraction_ok: dict[str, bool] | None = None,
 ) -> DataQuality:
+    """`critical_extraction_ok` (optional): logical_name -> whether the
+    canonical `MarketSnapshot` piece built from that endpoint's payload
+    actually carried the required information a decision needs (e.g. the
+    underlying's LTP, at least one option leg) - a payload can be
+    well-formed JSON, structurally valid, and fresh, yet still extract to
+    nothing usable. `data/snapshot_builder.py::build_market_snapshot` is
+    the only production caller and always supplies this, since only it
+    has built the canonical pieces by the time data quality is assessed.
+    Left `None` only by direct unit tests of this function that don't
+    need the extraction check.
+    """
     per_source: dict[str, SourceStatus] = {}
     stale_fields: list[str] = []
     unavailable_fields: list[str] = []
@@ -228,15 +285,24 @@ def build_data_quality(
         elif status.status in ("MISSING", "ERROR"):
             unavailable_fields.append(name)
 
-    critical_ok = bundle.all_critical_ok()
-    critical_stale = any(
-        per_source[name].status == "STALE" for name in bundle.critical_results()
-    )
+    # Computed from the assessed per-source STATUS (not the raw fetch-level
+    # `.ok`), so a critical endpoint that is stale, structurally invalid,
+    # or future-dated correctly makes critical_endpoints_ok False - not
+    # merely "HTTP 200 and JSON parsed".
+    critical_names = set(bundle.critical_results())
+    critical_ok = bool(critical_names) and all(per_source[name].status == "OK" for name in critical_names)
+
+    if critical_ok and critical_extraction_ok:
+        for name, extracted in critical_extraction_ok.items():
+            if name in critical_names and not extracted:
+                critical_ok = False
+                if name not in unavailable_fields:
+                    unavailable_fields.append(name)
 
     overall: DataQualityOverall
     if not critical_ok:
         overall = "INSUFFICIENT"
-    elif critical_stale or stale_fields or unavailable_fields:
+    elif stale_fields or unavailable_fields:
         overall = "DEGRADED"
     else:
         overall = "GOOD"

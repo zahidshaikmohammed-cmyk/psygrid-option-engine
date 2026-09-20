@@ -34,6 +34,7 @@ def _leg(
     oi: float | None = 10000,
     volume: float | None = 5000,
     delta: float | None = 0.5,
+    ltp: float | None = 100,
 ) -> OptionLeg:
     return OptionLeg(
         security_id=security_id,
@@ -41,7 +42,7 @@ def _leg(
         strike=strike,
         option_type=option_type,  # type: ignore[arg-type]
         expiry=expiry,
-        ltp=_sf(100),
+        ltp=_sf(ltp),
         bid=_sf(bid),
         ask=_sf(ask),
         volume=_sf(volume),
@@ -161,6 +162,37 @@ def test_missing_security_id_rejected() -> None:
     result = select_contract(chain, direction="CALL", underlying_ltp=25000)
     assert result.selected is None
     assert "security_id" in result.candidates[0].rejection_reason
+
+
+def test_missing_ltp_rejected() -> None:
+    chain = OptionChainSnapshot(underlying="NIFTY", legs=(_leg(25000, "CE", security_id="A", ltp=None),))
+    result = select_contract(chain, direction="CALL", underlying_ltp=25000)
+    assert result.selected is None
+    assert "LTP" in result.candidates[0].rejection_reason
+
+
+def test_zero_ltp_rejected() -> None:
+    chain = OptionChainSnapshot(underlying="NIFTY", legs=(_leg(25000, "CE", security_id="A", ltp=0.0),))
+    result = select_contract(chain, direction="CALL", underlying_ltp=25000)
+    assert result.selected is None
+    assert "LTP" in result.candidates[0].rejection_reason
+
+
+def test_empty_real_depth_falls_back_to_leg_bid_ask() -> None:
+    """A real InstrumentDepth object can exist with empty bids/asks (an
+    all-zero-price 20-slot ladder gets filtered to nothing in
+    data/snapshot_builder.py) - selection must fall back to the option
+    chain's own bid/ask rather than treating the hollow ladder as real and
+    reporting UNKNOWN liquidity."""
+    leg = _leg(25000, "CE", security_id="A", bid=99.5, ask=100.5, oi=10000)
+    depth = DepthSnapshot(
+        underlying="NIFTY",
+        by_security_id={"A": InstrumentDepth(security_id="A", bids=(), asks=())},
+    )
+    chain = OptionChainSnapshot(underlying="NIFTY", legs=(leg,))
+    result = select_contract(chain, direction="CALL", underlying_ltp=25000, max_spread_pct=5.0, depth=depth)
+    assert result.selected is not None
+    assert result.selected.depth.spread_pct is not None  # came from the leg fallback, not UNKNOWN
 
 
 def test_all_evaluated_candidates_kept_for_audit_trail() -> None:

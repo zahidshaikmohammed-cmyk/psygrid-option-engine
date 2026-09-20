@@ -17,9 +17,17 @@ from .conftest import OUTSIDE_SESSION_UTC, WITHIN_SESSION_UTC
 def _healthy_handler(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path.endswith("-options.json"):
-        return httpx.Response(200, json={"data": [{"strike": 24500}]})
+        # Real shape verified against artifacts/production_endpoint_samples.json
+        # (2026-09-19): strikes list of {strike, ce, pe}, chain-level expiry.
+        return httpx.Response(
+            200,
+            json={
+                "expiry": "2026-09-25",
+                "strikes": [{"strike": 24500, "ce": {"security_id": "CE1", "last_price": 120.0}}],
+            },
+        )
     if path.endswith("-depth.json"):
-        return httpx.Response(200, json={"data": []})
+        return httpx.Response(200, json={"contracts": []})
     if path in ("/public/nifty.json", "/public/banknifty.json"):
         return httpx.Response(200, json={"ltp": 100, "timestamp": "2026-09-18T05:00:00Z"})
     return httpx.Response(200, json={})

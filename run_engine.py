@@ -61,6 +61,19 @@ def _underlying_block(underlying: str, result: CycleResult) -> str:
     lines.append(f"LTP: {_fmt(ms.get('ltp'))}  (day chg {_fmt(ms.get('price_change_pct'))}%)")
     lines.append(f"VWAP: {_fmt(ms.get('vwap'))} ({ms.get('vwap_relation') or 'n/a'})")
     lines.append(f"Session H/L: {_fmt(ms.get('session_high'))} / {_fmt(ms.get('session_low'))}")
+    range_source = ms.get("range_source")
+    if range_source:
+        lines.append(
+            f"Expected range: {_fmt(ms.get('expected_range_lower'))} - "
+            f"{_fmt(ms.get('expected_range_upper'))} ({range_source})"
+        )
+    else:
+        lines.append("Expected range: unavailable (no ATR or VIX data yet)")
+    week_status = ms.get("week_range_status")
+    if week_status == "AVAILABLE":
+        lines.append(f"Week H/L: {_fmt(ms.get('current_week_high'))} / {_fmt(ms.get('current_week_low'))}")
+    else:
+        lines.append(f"Week H/L: {week_status or 'UNAVAILABLE'} (no multi-day history yet)")
     lines.append(f"Regime: {st.get('regime', 'UNKNOWN')} (trend bias: {st.get('trend_bias', 'UNKNOWN')})")
     lines.append(f"Data quality: {ms.get('data_quality', 'UNKNOWN')}")
     lines.append(f"Tier: {signal.tier} - {_tier_label(signal)}  [{signal.state}]")

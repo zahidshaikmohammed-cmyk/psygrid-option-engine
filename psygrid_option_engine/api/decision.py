@@ -32,7 +32,7 @@ from psygrid_option_engine.market.momentum import (
     compute_impulse,
 )
 from psygrid_option_engine.market.pullback import PullbackAssessment, classify_pullback
-from psygrid_option_engine.market.volatility import compute_range_model
+from psygrid_option_engine.market.volatility import RangeModel, compute_range_model
 from psygrid_option_engine.options.chain import compute_chain_metrics
 from psygrid_option_engine.options.selection import ContractCandidate, SelectionResult, select_contract
 from psygrid_option_engine.risk.validation import validate_risk
@@ -86,7 +86,13 @@ def decide(snapshot: MarketSnapshot, *, settings: Settings | None = None) -> Sig
     momentum_quality = assess_momentum_quality(impulse)
     pullback = _derive_pullback(structure_analysis.structure, ltp)
 
-    day_open = underlying.day_ohlc.open.value
+    # The canonical structural session open (structure/levels.py already
+    # falls back to the first closed M1 candle's open when the raw
+    # underlying payload has no top-level day-open field - which is the
+    # normal case in production, confirmed against a real payload). Using
+    # the raw field directly here would make price_change_pct silently
+    # None in production even though a perfectly good derived open exists.
+    day_open = structure_analysis.levels.today_open
     price_change_pct = ((ltp - day_open) / day_open * 100) if day_open else None
 
     # Genuine daily-bar ATR, computed only from D1 candles - a single-day
@@ -162,7 +168,7 @@ def decide(snapshot: MarketSnapshot, *, settings: Settings | None = None) -> Sig
         independent_streams=independent_streams,
     )
 
-    market_state = _market_state_summary(snapshot, structure_analysis, ltp, price_change_pct)
+    market_state = _market_state_summary(snapshot, structure_analysis, ltp, price_change_pct, range_model)
     structure_dict = _structure_summary(structure_analysis)
 
     if scan.best is None:
@@ -227,11 +233,16 @@ def _latest(values: list[float | None]) -> float | None:
 
 
 def _critical_data_reasons(snapshot: MarketSnapshot) -> list[str]:
-    reasons = [
-        f"critical endpoint issue: {name}"
-        for name, status in snapshot.data_quality.per_source.items()
-        if status.status in ("MISSING", "ERROR") and name in ("underlying", "options", "depth")
-    ]
+    reasons: list[str] = []
+    for name in ("underlying", "options", "depth"):
+        status = snapshot.data_quality.per_source.get(name)
+        if status is not None and status.status != "OK":
+            reasons.append(f"critical endpoint issue: {name} ({status.status.lower()})")
+        elif name in snapshot.data_quality.unavailable_fields:
+            # Fetch itself was fine, but the canonical data actually needed
+            # for a decision (e.g. underlying LTP, at least one option leg)
+            # could not be extracted from the payload.
+            reasons.append(f"critical endpoint issue: {name} (required data not extractable)")
     return reasons or ["critical upstream data unavailable"]
 
 
@@ -318,18 +329,55 @@ def _direction_evidence(
     ]
 
 
+def _range_source(range_model: RangeModel) -> str | None:
+    if range_model.atr_daily is not None and range_model.vix_implied_daily_move is not None:
+        return "ATR+VIX blend"
+    if range_model.atr_daily is not None:
+        return "ATR only (VIX unavailable)"
+    if range_model.vix_implied_daily_move is not None:
+        return "VIX-implied only (daily ATR unavailable)"
+    return None
+
+
 def _market_state_summary(
-    snapshot: MarketSnapshot, structure_analysis: StructureAnalysis, ltp: float, price_change_pct: float | None
+    snapshot: MarketSnapshot,
+    structure_analysis: StructureAnalysis,
+    ltp: float,
+    price_change_pct: float | None,
+    range_model: RangeModel,
 ) -> dict:
+    levels = structure_analysis.levels
+    week_range_available = levels.current_week_high is not None and levels.current_week_low is not None
     return {
         "ltp": ltp,
         "price_change_pct": price_change_pct,
         "vwap": structure_analysis.vwap,
         "vwap_relation": structure_analysis.vwap_relation,
-        "session_high": structure_analysis.levels.today_high,
-        "session_low": structure_analysis.levels.today_low,
-        "expected_range_upper": None,
-        "expected_range_lower": None,
+        "session_high": levels.today_high,
+        "session_low": levels.today_low,
+        # Never a calibrated probability (brief section 33) - an estimate
+        # blending the underlying's own ATR with a VIX-implied daily move,
+        # scaled by remaining-session time. None (with range_source=None)
+        # is the honest answer when neither ATR nor VIX is available yet,
+        # not a fabricated number.
+        "expected_range_upper": range_model.upper_boundary,
+        "expected_range_lower": range_model.lower_boundary,
+        "expected_daily_range": range_model.expected_daily_range,
+        "expected_remaining_range": range_model.expected_remaining_range,
+        "range_source": _range_source(range_model),
+        "atr_daily_component": range_model.atr_daily,
+        "vix_implied_daily_move_component": range_model.vix_implied_daily_move,
+        "session_range_so_far": range_model.session_range_so_far,
+        "range_utilization_pct": range_model.range_utilization_pct,
+        "time_remaining_minutes": range_model.time_remaining_minutes,
+        "current_week_high": levels.current_week_high,
+        "current_week_low": levels.current_week_low,
+        # Never fabricated from a single session's candles - see
+        # structure/levels.py: current_week_high/low only come from
+        # genuine multi-day D1 history. Truthfully reported as
+        # unavailable/insufficient history rather than silently presenting
+        # today's range as if it were the week's.
+        "week_range_status": "AVAILABLE" if week_range_available else "INSUFFICIENT_HISTORY",
         "data_quality": snapshot.data_quality.overall,
     }
 

@@ -28,13 +28,14 @@ that for per-field misses.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from psygrid_option_engine.config.settings import Settings, get_settings
 from psygrid_option_engine.data.models import EndpointFetchResult, RawFetchBundle
-from psygrid_option_engine.data.validation import build_data_quality, extract_timestamp
+from psygrid_option_engine.data.validation import LIST_CONTAINER_KEYS, build_data_quality, extract_timestamp
 from psygrid_option_engine.domain.field import SourcedField
 from psygrid_option_engine.domain.snapshot import (
     OHLC,
@@ -81,18 +82,10 @@ _SYMBOL_ALIASES = ("symbol", "trading_symbol", "tradingsymbol")
 _PREV_DAY_ALIASES = ("prev_day", "previous_day", "prevday", "prev_day_ohlc")
 _PREV_WEEK_ALIASES = ("prev_week", "previous_week", "prevweek", "prev_week_ohlc")
 
-_LIST_CONTAINER_ALIASES = (
-    "data",
-    "results",
-    "items",
-    "chain",
-    "strikes",
-    "options",
-    "records",
-    "legs",
-    "contracts",
-    "sectors",
-)
+# Single source of truth shared with data/validation.py's structural
+# checks - see that module's LIST_CONTAINER_KEYS docstring for why this
+# must never be a second, separately-maintained copy again.
+_LIST_CONTAINER_ALIASES = LIST_CONTAINER_KEYS
 
 _CANDLE_TIMEFRAME_ALIASES: dict[Timeframe, tuple[str, ...]] = {
     Timeframe.M1: ("candles_1m", "ohlc_1m", "intraday_1m", "1m", "candles1m"),
@@ -122,13 +115,23 @@ def _as_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        result = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value.strip())
+            result = float(value.strip())
         except ValueError:
             return None
-    return None
+    else:
+        return None
+    # Python's json module accepts the non-standard NaN/Infinity/-Infinity
+    # literals by default; a market-data value can never legitimately be
+    # one of these, and letting one through would silently corrupt every
+    # downstream comparison/arithmetic (NaN compares False against
+    # everything) rather than failing loudly. Treat as unavailable, same
+    # as any other unparseable value.
+    if math.isnan(result) or math.isinf(result):
+        return None
+    return result
 
 
 def _as_date(value: Any) -> date | None:
@@ -213,6 +216,20 @@ def _build_candle(item: dict[str, Any], timeframe: Timeframe, *, as_of: datetime
     )
 
 
+def _dedupe_and_sort_candles(candles: list[Candle]) -> tuple[Candle, ...]:
+    """Upstream can (rarely) resend a timestamp already seen - e.g. a
+    revised/corrected bar, or a websocket replay glitch - or deliver bars
+    out of order. One candle per `start` (last occurrence wins, since a
+    later entry for the same period is the most likely to be the
+    corrected/final version), sorted ascending, so every downstream
+    consumer can rely on a clean one-bar-per-period series without each
+    reimplementing this."""
+    by_start: dict[datetime, Candle] = {}
+    for c in candles:
+        by_start[c.start] = c
+    return tuple(sorted(by_start.values(), key=lambda c: c.start))
+
+
 def _build_underlying(result: EndpointFetchResult | None, *, as_of: datetime) -> UnderlyingSnapshot | None:
     if result is None or result.data is None or not isinstance(result.data, dict):
         return None
@@ -225,9 +242,10 @@ def _build_underlying(result: EndpointFetchResult | None, *, as_of: datetime) ->
         raw_list = _get_alias(d, aliases)
         if isinstance(raw_list, list):
             built = [_build_candle(item, tf, as_of=as_of) for item in raw_list if isinstance(item, dict)]
-            filtered = tuple(c for c in built if c is not None and c.start <= as_of)
-            if filtered:
-                candles[tf] = filtered
+            filtered = [c for c in built if c is not None and c.start <= as_of]
+            deduped = _dedupe_and_sort_candles(filtered)
+            if deduped:
+                candles[tf] = deduped
 
     prev_day_raw = _get_alias(d, _PREV_DAY_ALIASES)
     prev_week_raw = _get_alias(d, _PREV_WEEK_ALIASES)
@@ -356,6 +374,17 @@ def _build_options(
 
 
 def _build_depth_levels(raw: Any) -> tuple[DepthLevel, ...]:
+    """Verified against artifacts/production_endpoint_samples.json
+    (2026-09-19): the real depth payload always sends a fixed-length
+    20-slot array per side, whether quoted or not - an empty book slot is
+    `{"price": 0.0, "quantity": 0, "orders": 0}`, not simply absent. A
+    price of 0 (or non-positive) is never a real resting order, so it is
+    filtered out here rather than surfaced as a fabricated-looking
+    `best_bid=0.0`/`best_ask=0.0` - a genuinely all-empty ladder must
+    become an empty tuple so callers (options/selection.py) correctly
+    treat it as "no real depth" and fall back to the option chain's own
+    bid/ask, instead of trusting a hollow ladder as if it were real.
+    """
     if not isinstance(raw, list):
         return ()
     levels: list[DepthLevel] = []
@@ -364,7 +393,7 @@ def _build_depth_levels(raw: Any) -> tuple[DepthLevel, ...]:
             continue
         price = _as_float(_get_alias(item, ("price",)))
         qty = _as_float(_get_alias(item, ("quantity", "qty", "size")))
-        if price is None or qty is None:
+        if price is None or qty is None or price <= 0:
             continue
         orders_raw = _get_alias(item, ("orders", "num_orders"))
         orders = int(orders_raw) if isinstance(orders_raw, (int, float)) else None
@@ -523,16 +552,42 @@ def build_market_snapshot(
     bundle happens to contain one (docs/ARCHITECTURE.md section 3).
     """
     settings = settings or get_settings()
-    data_quality = build_data_quality(bundle, settings=settings, as_of=as_of)
+
+    underlying_snapshot = _build_underlying(bundle.results.get("underlying"), as_of=as_of)
+    options = _build_options(bundle.results.get("options"), underlying=bundle.underlying, as_of=as_of)
+    depth = _build_depth(bundle.results.get("depth"), underlying=bundle.underlying)
+
+    # "required canonical information is actually extractable" (a critical
+    # endpoint can be a well-formed, fresh, structurally valid payload and
+    # still extract to nothing usable - e.g. an options chain whose every
+    # strike failed to parse into a leg). Deliberately NOT applied to
+    # "depth": an empty/zero-level depth ladder is a legitimate per-
+    # instrument liquidity fact with an intentional fallback
+    # (options/selection.py falls back to the option chain's own bid/ask),
+    # not a data-integrity failure - forcing it here would fight that
+    # design rather than harden it. "depth is None" (the one genuine
+    # extraction failure for this endpoint) is already caught by the
+    # fetch-level MISSING/ERROR check in data/validation.py.
+    critical_extraction_ok = {
+        "underlying": (
+            underlying_snapshot is not None
+            and underlying_snapshot.ltp.available
+            and underlying_snapshot.ltp.value is not None
+        ),
+        "options": options is not None and len(options.legs) > 0,
+    }
+    data_quality = build_data_quality(
+        bundle, settings=settings, as_of=as_of, critical_extraction_ok=critical_extraction_ok
+    )
 
     return MarketSnapshot(
         underlying=bundle.underlying,
         as_of=as_of,
         data_quality=data_quality,
-        underlying_snapshot=_build_underlying(bundle.results.get("underlying"), as_of=as_of),
+        underlying_snapshot=underlying_snapshot,
         futures=_build_futures(bundle.results.get("futures"), as_of=as_of),
-        options=_build_options(bundle.results.get("options"), underlying=bundle.underlying, as_of=as_of),
-        depth=_build_depth(bundle.results.get("depth"), underlying=bundle.underlying),
+        options=options,
+        depth=depth,
         breadth=_build_breadth(bundle.results.get("market_breadth")),
         sectors=_build_sectors(bundle.results.get("sectors")),
         vix=_build_vix(bundle.results.get("india_vix")),

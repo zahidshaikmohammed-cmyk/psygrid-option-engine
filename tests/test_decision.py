@@ -17,6 +17,16 @@ def _result(name: str, criticality: EndpointCriticality, data: object, *, as_of:
     )
 
 
+def _minimal_options_payload(strike: float = 24000.0) -> dict:
+    """The smallest options payload that survives the critical-extraction
+    check (at least one real leg) - real shape verified against
+    artifacts/production_endpoint_samples.json (2026-09-19)."""
+    return {
+        "expiry": "2026-09-25",
+        "strikes": [{"strike": strike, "ce": {"security_id": "CE1", "last_price": 100.0}}],
+    }
+
+
 def _uptrend_candles(n: int) -> list[dict]:
     """10-bar cycle (5 up @ +15, 5 shallow pullback @ -8): clean HH/HL, and
     with n=85 the final 5-bar momentum window (indices 80-84) sits entirely
@@ -58,7 +68,12 @@ def test_missing_ltp_yields_no_trade() -> None:
     snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
     signal = decide(snapshot, settings=Settings())
     assert signal.state == "NO_TRADE"
-    assert "last traded price" in signal.reasons[0]
+    # Missing LTP now fails data_quality.critical_endpoints_ok itself (the
+    # underlying payload fetched fine but had no extractable LTP), so this
+    # is caught by the earlier critical-data gate rather than the later
+    # explicit ltp-is-None check - both paths are NO_TRADE either way.
+    assert snapshot.data_quality.critical_endpoints_ok is False
+    assert "underlying" in signal.reasons[0]
 
 
 def test_flat_market_no_evidence_yields_no_trade_with_developing_setup_absent_or_tier_zero() -> None:
@@ -159,6 +174,127 @@ def test_favorable_conditions_reach_trade_ready() -> None:
     assert signal.execution.stop_loss < signal.execution.entry < signal.execution.take_profit
     assert signal.execution.risk_reward > 0
     assert signal.reasons
+
+
+def test_expected_range_flows_into_market_state_when_available() -> None:
+    as_of = SESSION_OPEN + timedelta(minutes=30)
+    candles = _uptrend_candles(30)
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL,
+                {"symbol": "NIFTY", "ltp": candles[-1]["close"], "candles_1m": candles}, as_of=as_of,
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+            "india_vix": _result("india_vix", EndpointCriticality.OPTIONAL, {"value": 15.0}, as_of=as_of),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    # RangeModel is computed (session range + VIX-implied move are both
+    # derivable here) - the market_state must actually expose it, not
+    # hardcode None despite a real computed value existing.
+    assert signal.market_state["expected_range_upper"] is not None
+    assert signal.market_state["expected_range_lower"] is not None
+    assert signal.market_state["range_source"] == "VIX-implied only (daily ATR unavailable)"
+    assert signal.market_state["expected_range_upper"] > signal.market_state["expected_range_lower"]
+
+
+def test_expected_range_unavailable_when_no_atr_or_vix() -> None:
+    as_of = SESSION_OPEN + timedelta(minutes=2)
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL, {"symbol": "NIFTY", "ltp": 24000}, as_of=as_of
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    assert signal.market_state["expected_range_upper"] is None
+    assert signal.market_state["range_source"] is None
+
+
+def test_price_change_pct_uses_canonical_session_open_not_missing_raw_field() -> None:
+    # Real production payloads have no top-level day-open field at all
+    # (verified against artifacts/production_endpoint_samples.json) - only
+    # the M1-candle-derived canonical open should be used.
+    as_of = SESSION_OPEN + timedelta(minutes=3)
+    candles = [
+        {"timestamp": (SESSION_OPEN + timedelta(minutes=i)).isoformat().replace("+00:00", "Z"),
+         "open": 24000 + i, "high": 24005 + i, "low": 23995 + i, "close": 24000 + i, "volume": 100}
+        for i in range(3)
+    ]
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL,
+                {"symbol": "NIFTY", "ltp": 24010, "candles_1m": candles}, as_of=as_of,  # no "open" field at all
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    assert snapshot.underlying_snapshot.day_ohlc.open.available is False  # confirms no raw field existed
+    assert signal.market_state["price_change_pct"] is not None
+
+
+def test_week_range_status_insufficient_history_without_d1() -> None:
+    as_of = SESSION_OPEN + timedelta(minutes=5)
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL, {"symbol": "NIFTY", "ltp": 24000}, as_of=as_of
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    assert signal.market_state["week_range_status"] == "INSUFFICIENT_HISTORY"
+    assert signal.market_state["current_week_high"] is None
+
+
+def test_week_range_status_available_with_genuine_d1_history() -> None:
+    # SESSION_OPEN is Friday 2026-09-18; Monday/Tuesday of the same ISO
+    # week give genuine multi-day D1 history to aggregate a real week range
+    # from - this must never come from today's own M1 candles alone.
+    as_of = SESSION_OPEN + timedelta(minutes=5)
+    d1_candles = [
+        {"timestamp": "2026-09-14T03:45:00Z", "open": 23900, "high": 24100, "low": 23850, "close": 24050},
+        {"timestamp": "2026-09-15T03:45:00Z", "open": 24050, "high": 24300, "low": 24000, "close": 24200},
+    ]
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL,
+                {"symbol": "NIFTY", "ltp": 24000, "candles_1d": d1_candles}, as_of=as_of,
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    assert signal.market_state["week_range_status"] == "AVAILABLE"
+    assert signal.market_state["current_week_high"] == 24300
+    assert signal.market_state["current_week_low"] == 23850
 
 
 def test_session_cutoff_blocks_new_trade_even_with_favorable_setup() -> None:
