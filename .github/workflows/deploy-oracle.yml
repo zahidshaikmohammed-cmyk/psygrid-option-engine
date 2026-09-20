@@ -1,0 +1,156 @@
+name: Deploy PSYGRID Option Engine to Oracle
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-production
+  cancel-in-progress: false
+
+jobs:
+  test-and-deploy:
+    name: Test and deploy pushed commit to Oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout exact pushed commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: Prepare SSH
+        env:
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$ORACLE_SSH_KEY"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$ORACLE_SSH_KEY" > "$HOME/.ssh/oracle_deploy_key"
+          chmod 600 "$HOME/.ssh/oracle_deploy_key"
+          ssh-keyscan -H 140.245.226.102 >> "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Verify Oracle connectivity
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/oracle_deploy_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            ubuntu@140.245.226.102 \
+            'printf "oracle-ssh-ok host=%s\n" "$(hostname)"'
+
+      - name: Sync repository to Oracle
+        run: |
+          set -euo pipefail
+
+          ssh_opts="-i $HOME/.ssh/oracle_deploy_key -o BatchMode=yes -o ConnectTimeout=10"
+
+          ssh $ssh_opts ubuntu@140.245.226.102 '
+            set -e
+            mkdir -p "$HOME/psygrid-option-engine"
+            command -v rsync >/dev/null 2>&1 || {
+              sudo apt-get update
+              sudo apt-get install -y rsync
+            }
+          '
+
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.venv/' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            -e "ssh $ssh_opts" \
+            ./ \
+            ubuntu@140.245.226.102:~/psygrid-option-engine/
+
+          printf '%s\n' "$GITHUB_SHA" | \
+            ssh $ssh_opts ubuntu@140.245.226.102 \
+            'cat > "$HOME/psygrid-option-engine/.deploy-commit"'
+
+      - name: Install production dependencies and restart engine
+        run: |
+          set -euo pipefail
+
+          ssh -i "$HOME/.ssh/oracle_deploy_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            ubuntu@140.245.226.102 'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          cd "$HOME/psygrid-option-engine"
+
+          if [ ! -x ".venv/bin/python" ]; then
+            python3 -m venv .venv
+          fi
+
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e .
+
+          sudo tee /etc/systemd/system/psygrid-option-engine.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=PSYGRID Option Engine
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/psygrid-option-engine
+          ExecStart=/home/ubuntu/psygrid-option-engine/.venv/bin/python /home/ubuntu/psygrid-option-engine/run_engine.py --live --underlying BOTH
+          Restart=always
+          RestartSec=5
+          Environment=PYTHONUNBUFFERED=1
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable psygrid-option-engine.service
+          sudo systemctl restart psygrid-option-engine.service
+
+          sleep 3
+          sudo systemctl --no-pager --full status psygrid-option-engine.service
+          REMOTE
+
+      - name: Verify deployed commit and service
+        run: |
+          set -euo pipefail
+
+          deployed="$(ssh -i "$HOME/.ssh/oracle_deploy_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            ubuntu@140.245.226.102 \
+            'cat "$HOME/psygrid-option-engine/.deploy-commit"')"
+
+          echo "oracle_deployed_commit=$deployed"
+          test "$deployed" = "$GITHUB_SHA"
+
+          ssh -i "$HOME/.ssh/oracle_deploy_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            ubuntu@140.245.226.102 \
+            'sudo systemctl is-active --quiet psygrid-option-engine.service'
+
+          echo "oracle_service=active"
