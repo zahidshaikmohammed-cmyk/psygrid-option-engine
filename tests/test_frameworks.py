@@ -150,6 +150,41 @@ def test_compression_expansion_fires_on_expansion_with_bias() -> None:
     assert result.direction == "CALL"
 
 
+def test_structural_reversal_bullish_on_rejection_at_major_support() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.PDL, level=100.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.REJECTION)
+    ctx = _base_ctx(regime=_regime(MarketRegime.REVERSAL_ATTEMPT), level_reactions=(reaction,), ltp=105.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.STRUCTURAL_REVERSAL)
+    assert result.applicable is True
+    assert result.direction == "CALL"
+    assert result.invalidation_level == 100.0
+
+
+def test_structural_reversal_bearish_on_rejection_at_major_resistance() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.PWH, level=200.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.REJECTION)
+    ctx = _base_ctx(regime=_regime(MarketRegime.REVERSAL_ATTEMPT), level_reactions=(reaction,), ltp=195.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.STRUCTURAL_REVERSAL)
+    assert result.applicable is True
+    assert result.direction == "PUT"
+
+
+def test_structural_reversal_ignores_non_major_level() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.EQUAL_HIGH, level=200.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.REJECTION)
+    ctx = _base_ctx(regime=_regime(MarketRegime.REVERSAL_ATTEMPT), level_reactions=(reaction,), ltp=195.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.STRUCTURAL_REVERSAL)
+    assert result.applicable is False
+
+
+def test_structural_reversal_not_applicable_outside_reversal_regime() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.PDH, level=200.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.REJECTION)
+    ctx = _base_ctx(regime=_regime(MarketRegime.RANGE), level_reactions=(reaction,), ltp=195.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.STRUCTURAL_REVERSAL)
+    assert result.applicable is False
+
+
 def test_applicable_frameworks_filters_out_inapplicable() -> None:
     ctx = _base_ctx(regime=_regime(MarketRegime.UNCERTAIN))
     assert applicable_frameworks(ctx) == []

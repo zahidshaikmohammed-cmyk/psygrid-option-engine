@@ -25,6 +25,7 @@ from psygrid_option_engine.market.pullback import PullbackAssessment, PullbackTy
 from psygrid_option_engine.market.volatility import RangeModel
 from psygrid_option_engine.structure.types import (
     LevelReaction,
+    LiquidityKind,
     LiquidityZone,
     MarketRegime,
     ReactionKind,
@@ -36,6 +37,19 @@ from psygrid_option_engine.structure.types import (
 
 Direction = Literal["CALL", "PUT"]
 
+# Levels significant enough to carry a broader structural-reversal read,
+# rather than just a range boundary - PDH/PDL/PWH/PWL/session extremes.
+_MAJOR_LEVEL_KINDS = frozenset(
+    {
+        LiquidityKind.PDH,
+        LiquidityKind.PDL,
+        LiquidityKind.PWH,
+        LiquidityKind.PWL,
+        LiquidityKind.SESSION_HIGH,
+        LiquidityKind.SESSION_LOW,
+    }
+)
+
 
 class FrameworkName(StrEnum):
     TREND_CONTINUATION = "TREND_CONTINUATION"
@@ -45,6 +59,7 @@ class FrameworkName(StrEnum):
     FAILED_BREAKOUT_REVERSAL = "FAILED_BREAKOUT_REVERSAL"
     CONFIRMED_STRUCTURAL_BREAKOUT = "CONFIRMED_STRUCTURAL_BREAKOUT"
     COMPRESSION_EXPANSION = "COMPRESSION_EXPANSION"
+    STRUCTURAL_REVERSAL = "STRUCTURAL_REVERSAL"
 
 
 @dataclass(frozen=True)
@@ -219,6 +234,24 @@ def _compression_expansion(ctx: FrameworkContext) -> FrameworkResult:
     )
 
 
+def _structural_reversal(ctx: FrameworkContext) -> FrameworkResult:
+    name = FrameworkName.STRUCTURAL_REVERSAL
+    if ctx.regime.regime is not MarketRegime.REVERSAL_ATTEMPT:
+        return _not_applicable(name, ("regime is not REVERSAL_ATTEMPT",))
+    major_reactions = tuple(r for r in ctx.level_reactions if r.zone.kind in _MAJOR_LEVEL_KINDS)
+    reaction = _nearest_reaction(major_reactions, ReactionKind.REJECTION, ctx.ltp)
+    if reaction is None or ctx.ltp is None:
+        return _not_applicable(name, ("no rejection reaction found at a major structural level",))
+
+    # rejection at a major resistance (zone above price) -> bearish; at a
+    # major support (zone below price) -> bullish.
+    bullish = reaction.zone.level < ctx.ltp
+    direction: Direction = "CALL" if bullish else "PUT"
+    met = (f"rejection confirmed at major level {reaction.zone.kind.value} ({reaction.zone.level:g})",)
+    trigger = f"structural reversal at {reaction.zone.kind.value}"
+    return FrameworkResult(name, True, direction, reaction.zone.level, None, trigger, met, ())
+
+
 _ALL_FRAMEWORKS = (
     _trend_continuation,
     _structured_pullback,
@@ -227,6 +260,7 @@ _ALL_FRAMEWORKS = (
     _failed_breakout_reversal,
     _confirmed_structural_breakout,
     _compression_expansion,
+    _structural_reversal,
 )
 
 

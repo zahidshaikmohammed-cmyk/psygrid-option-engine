@@ -51,10 +51,16 @@ v1 limitations, called out in each module's own docstring:
 - **Tier thresholds and the execution safety margin are rule-based v1
   constants**, documented as such, not statistically calibrated — that's
   Phase-11-and-beyond `calibration` work once real replay outcomes exist.
-- **The strategy framework library covers 7 named frameworks** (trend
+- **The strategy framework library covers 8 named frameworks** (trend
   continuation, structured pullback, liquidity-sweep confirmation, range
   rejection, failed-breakout reversal, confirmed structural breakout,
-  compression→expansion), not an exhaustive catalogue.
+  compression→expansion, structural reversal), not an exhaustive catalogue.
+  `structural_reversal` is what fires when `structure/regime.py` classifies
+  `MarketRegime.REVERSAL_ATTEMPT` — a regime that previously had zero
+  framework coverage, meaning a genuine reversal-attempt read could never
+  become an actionable opportunity; it now requires a REJECTION reaction at
+  a *major* structural level (PDH/PDL/PWH/PWL/session high/low), not any
+  minor liquidity zone.
 - **`--live` mode now monitors an active `TRADE_READY` signal tick-to-tick**
   (`run_engine.py::_check_active_trades`): each cycle it checks the
   underlying's current LTP against the structural invalidation level and
