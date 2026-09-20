@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from psygrid_option_engine.api.runtime import CycleResult, EngineRuntime
 from psygrid_option_engine.authorization.tiers import TIER_LABELS, Tier
+from psygrid_option_engine.config.session import SessionPhase
 from psygrid_option_engine.config.settings import Settings, get_settings
 from psygrid_option_engine.data.snapshot_builder import build_market_snapshot
 from psygrid_option_engine.signals.lifecycle import LifecycleTracker
@@ -167,7 +168,16 @@ def _run_once(runtime: EngineRuntime, underlyings: tuple[str, ...], *, now: date
 def _lifecycle_key(underlying: str, signal: Signal) -> str:
     if signal.state == "TRADE_READY":
         framework = signal.authorization.get("framework", "?")
-        return f"{underlying}:{signal.direction}:{framework}"
+        # Deterministic setup identity (section 7): including the numeric
+        # structural invalidation level means a *genuinely* new setup
+        # (the market having produced a new structural read at a
+        # different level) automatically gets its own key, while the
+        # exact same setup recurring at the exact same level - e.g. right
+        # after it was just invalidated/targeted - is recognized as the
+        # same identity and stays subject to LifecycleTracker's terminal-
+        # state/cooldown guard instead of silently resurrecting.
+        level = round(signal.execution.underlying_invalidation_level, 2)
+        return f"{underlying}:{signal.direction}:{framework}:{level:g}"
     setup = signal.best_developing_setup
     if setup is not None:
         return f"{underlying}:{setup.direction}:{setup.framework}"
@@ -211,16 +221,30 @@ def _current_premium(result: CycleResult, security_id: str, *, as_of: datetime, 
 
 
 def _register_new_active_trades(
-    active_trades: dict[str, ActiveTrade], results: dict[str, CycleResult], now: datetime
+    active_trades: dict[str, ActiveTrade],
+    results: dict[str, CycleResult],
+    now: datetime,
+    tracker: LifecycleTracker,
 ) -> None:
+    """Registers each underlying's freshest TRADE_READY signal for active
+    monitoring - but not if that exact setup identity (see
+    `_lifecycle_key`) is still a cooling-down terminal state in `tracker`.
+    Without this check, a trade that `_check_active_trades` just resolved
+    this same tick (deleting it from `active_trades`) would immediately
+    re-register here if `decide()` still reports the identical signal,
+    which is exactly the immediate-re-entry failure mode this guards
+    against (section 7)."""
     for underlying, result in results.items():
         if underlying in active_trades:
             continue  # already monitoring a trade for this underlying to conclusion
         signal = result.signal
         if not isinstance(signal, TradeReadySignal):
             continue
+        key = _lifecycle_key(underlying, signal)
+        if tracker.is_cooling_down(key, as_of=now):
+            continue  # same setup identity resolved too recently - do not resurrect it
         active_trades[underlying] = ActiveTrade(
-            key=_lifecycle_key(underlying, signal),
+            key=key,
             underlying=underlying,
             direction=signal.direction,
             security_id=signal.contract.security_id,
@@ -282,11 +306,34 @@ def _check_active_trades(
     return resolved
 
 
+def _force_session_exit(
+    active_trades: dict[str, ActiveTrade], tracker: LifecycleTracker, *, now: datetime, settings: Settings
+) -> bool:
+    """Brief section 6: 15:00 IST is both the new-entry hard cutoff AND the
+    point past which an internally-tracked ACTIVE setup must not keep
+    appearing live - this is a signal-only engine with no broker position
+    to square off, but "still monitoring" after the point real intraday
+    risk would need to be closed is itself misleading output. Reuses the
+    same entry-cutoff boundary `risk/validation.py` already gates new
+    entries on (`SessionPhase.POST_ENTRY_CUTOFF`), so there is exactly one
+    definition of "too late" in the whole engine."""
+    if settings.session_window().phase_at(now) is not SessionPhase.POST_ENTRY_CUTOFF:
+        return False
+    resolved = False
+    for underlying in list(active_trades):
+        trade = active_trades[underlying]
+        print(f"[{underlying}] SESSION EXIT (15:00 entry cutoff reached) - {trade.security_id}")
+        tracker.force_expire(trade.key, as_of=now)
+        del active_trades[underlying]
+        resolved = True
+    return resolved
+
+
 def _run_live(
     runtime: EngineRuntime, underlyings: tuple[str, ...], interval: float, *, settings: Settings | None = None
 ) -> int:
     settings = settings or get_settings()
-    tracker = LifecycleTracker()
+    tracker = LifecycleTracker(reentry_cooldown_seconds=settings.lifecycle_reentry_cooldown_seconds)
     active_trades: dict[str, ActiveTrade] = {}
     print(f"Live mode: refreshing every {interval:.0f}s. Signal-only - this process never places orders.")
     print("Press Ctrl+C to stop.\n")
@@ -296,10 +343,11 @@ def _run_live(
             now = datetime.now(UTC)
             results = {u: runtime.run_cycle(u, now=now) for u in underlyings}
 
+            session_exited = _force_session_exit(active_trades, tracker, now=now, settings=settings)
             trade_resolved = _check_active_trades(active_trades, results, tracker, now=now, settings=settings)
-            _register_new_active_trades(active_trades, results, now)
+            _register_new_active_trades(active_trades, results, now, tracker)
 
-            changed = trade_resolved
+            changed = trade_resolved or session_exited
             for u, result in results.items():
                 if result.signal is None:
                     continue

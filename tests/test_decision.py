@@ -269,6 +269,78 @@ def test_week_range_status_insufficient_history_without_d1() -> None:
     assert signal.market_state["current_week_high"] is None
 
 
+def test_event_risk_context_surfaces_as_conflicting_evidence() -> None:
+    # market/context.py::analyze_context was implemented and tested but
+    # never wired into the decision pipeline - a known event-risk news
+    # item must actually reach evidence_summary once a framework is
+    # applicable, not be computed and silently discarded. Reuses the
+    # trending fixture (guarantees TRENDING_UP -> a framework fires) but
+    # without full options/depth, so it lands as a developing setup rather
+    # than TRADE_READY - either way its evidence is visible.
+    candles = _uptrend_candles(85)
+    as_of = SESSION_OPEN + timedelta(minutes=85)
+    ltp = candles[-1]["close"]
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL,
+                {"symbol": "NIFTY", "ltp": ltp, "candles_1m": candles}, as_of=as_of,
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+            "rbi_news": _result(
+                "rbi_news", EndpointCriticality.OPTIONAL,
+                {"data": [{"headline": "RBI announces emergency rate policy meeting", "timestamp": as_of.isoformat()}]},
+                as_of=as_of,
+            ),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    evidence_summary = (
+        signal.reasons
+        if signal.state == "TRADE_READY"
+        else (signal.best_developing_setup.evidence_summary if signal.best_developing_setup else ())
+    )
+    assert any("event-risk" in item for item in evidence_summary)
+
+
+def test_breadth_divergence_surfaces_as_conflicting_evidence() -> None:
+    # market/divergence.py::detect_divergences was implemented and tested
+    # but never wired into the decision pipeline - breadth actively
+    # conflicting with an uptrend must actually reach evidence_summary.
+    candles = _uptrend_candles(85)
+    as_of = SESSION_OPEN + timedelta(minutes=85)
+    ltp = candles[-1]["close"]
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=as_of,
+        results={
+            "underlying": _result(
+                "underlying", EndpointCriticality.CRITICAL,
+                {"symbol": "NIFTY", "ltp": ltp, "candles_1m": candles}, as_of=as_of,
+            ),
+            "options": _result("options", EndpointCriticality.CRITICAL, _minimal_options_payload(), as_of=as_of),
+            "depth": _result("depth", EndpointCriticality.CRITICAL, {"contracts": []}, as_of=as_of),
+            # Sharply negative breadth while price is trending up -> a
+            # CONFLICTING breadth stance for the CALL direction.
+            "market_breadth": _result(
+                "market_breadth", EndpointCriticality.OPTIONAL, {"advancing": 100, "declining": 1900}, as_of=as_of
+            ),
+        },
+    )
+    snapshot = build_market_snapshot(bundle, as_of=as_of, settings=Settings())
+    signal = decide(snapshot, settings=Settings())
+    evidence_summary = (
+        signal.reasons
+        if signal.state == "TRADE_READY"
+        else (signal.best_developing_setup.evidence_summary if signal.best_developing_setup else ())
+    )
+    assert any("divergence:BREADTH_CONFLICT" in item for item in evidence_summary)
+
+
 def test_week_range_status_available_with_genuine_d1_history() -> None:
     # SESSION_OPEN is Friday 2026-09-18; Monday/Tuesday of the same ISO
     # week give genuine multi-day D1 history to aggregate a real week range

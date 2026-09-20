@@ -238,7 +238,7 @@ def test_register_new_active_trades_adds_entry() -> None:
         "NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), _trade_ready_signal(), "x")
     }
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, NOW)
+    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker())
     assert "NIFTY" in active
     assert active["NIFTY"].security_id == "CE1"
     assert active["NIFTY"].direction == "CALL"
@@ -250,15 +250,64 @@ def test_register_skips_if_already_tracked() -> None:
     }
     existing = _trade(security_id="OLD")
     active = {"NIFTY": existing}
-    run_engine._register_new_active_trades(active, results, NOW)
+    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker())
     assert active["NIFTY"] is existing
 
 
 def test_register_skips_no_trade_signal() -> None:
     results = {"NIFTY": CycleResult(EngineState.NO_TRADE, "NIFTY", None, _data_quality(), _no_trade_signal(), "x")}
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, NOW)
+    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker())
     assert active == {}
+
+
+def test_register_skips_same_setup_identity_still_cooling_down() -> None:
+    # Section 7: a resolved setup must not immediately resurrect. Simulate
+    # the exact failure mode - the same TRADE_READY signal (same
+    # framework/direction/structural-invalidation-level) is still being
+    # reported by decide() on the tick right after it was invalidated.
+    signal = _trade_ready_signal()
+    key = run_engine._lifecycle_key("NIFTY", signal)
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    tracker.update(key=key, tier=0, as_of=NOW, invalidated=True)
+
+    results = {"NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), signal, "x")}
+    active: dict = {}
+    run_engine._register_new_active_trades(active, results, NOW, tracker)
+    assert active == {}  # not re-registered while cooling down
+
+
+def test_register_allows_genuinely_new_setup_at_different_level() -> None:
+    # A different structural invalidation level is a different setup
+    # identity (a different key) and must never be blocked by another
+    # key's cooldown.
+    old_signal = _trade_ready_signal()
+    old_key = run_engine._lifecycle_key("NIFTY", old_signal)
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    tracker.update(key=old_key, tier=0, as_of=NOW, invalidated=True)
+
+    new_signal = old_signal.model_copy(
+        update={"execution": old_signal.execution.model_copy(update={"underlying_invalidation_level": 24600.0})}
+    )
+    results = {"NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), new_signal, "x")}
+    active: dict = {}
+    run_engine._register_new_active_trades(active, results, NOW, tracker)
+    assert "NIFTY" in active
+
+
+def test_register_allows_after_cooldown_elapses() -> None:
+    from datetime import timedelta
+
+    signal = _trade_ready_signal()
+    key = run_engine._lifecycle_key("NIFTY", signal)
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    tracker.update(key=key, tier=0, as_of=NOW, invalidated=True)
+
+    later = NOW + timedelta(seconds=301)
+    results = {"NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), signal, "x")}
+    active: dict = {}
+    run_engine._register_new_active_trades(active, results, later, tracker)
+    assert "NIFTY" in active
 
 
 def test_current_premium_found_in_bundle() -> None:
@@ -318,6 +367,53 @@ def test_check_active_trades_no_hit_keeps_monitoring() -> None:
     resolved = run_engine._check_active_trades(active, results, tracker, now=NOW, settings=Settings())
     assert resolved is False
     assert "NIFTY" in active
+
+
+# IST is UTC+5:30, on the same 2026-09-18 calendar date as NOW.
+_T_14_59_59_IST = datetime(2026, 9, 18, 9, 29, 59, tzinfo=UTC)
+_T_15_00_00_IST = datetime(2026, 9, 18, 9, 30, 0, tzinfo=UTC)
+_T_15_00_01_IST = datetime(2026, 9, 18, 9, 30, 1, tzinfo=UTC)
+_T_15_15_00_IST = datetime(2026, 9, 18, 9, 45, 0, tzinfo=UTC)
+
+
+def test_force_session_exit_noop_before_entry_cutoff() -> None:
+    active = {"NIFTY": _trade()}
+    tracker = LifecycleTracker()
+    resolved = run_engine._force_session_exit(active, tracker, now=_T_14_59_59_IST, settings=Settings())
+    assert resolved is False
+    assert "NIFTY" in active
+
+
+def test_force_session_exit_fires_exactly_at_15_00_00() -> None:
+    trade = _trade()
+    active = {"NIFTY": trade}
+    tracker = LifecycleTracker()
+    resolved = run_engine._force_session_exit(active, tracker, now=_T_15_00_00_IST, settings=Settings())
+    assert resolved is True
+    assert "NIFTY" not in active
+    assert tracker.get(trade.key).state is LifecycleState.EXPIRED
+
+
+def test_force_session_exit_fires_after_15_00_01() -> None:
+    active = {"NIFTY": _trade()}
+    tracker = LifecycleTracker()
+    resolved = run_engine._force_session_exit(active, tracker, now=_T_15_00_01_IST, settings=Settings())
+    assert resolved is True
+    assert active == {}
+
+
+def test_force_session_exit_fires_at_15_15_00() -> None:
+    active = {"NIFTY": _trade()}
+    tracker = LifecycleTracker()
+    resolved = run_engine._force_session_exit(active, tracker, now=_T_15_15_00_IST, settings=Settings())
+    assert resolved is True
+    assert active == {}
+
+
+def test_force_session_exit_noop_when_nothing_active() -> None:
+    tracker = LifecycleTracker()
+    resolved = run_engine._force_session_exit({}, tracker, now=_T_15_00_01_IST, settings=Settings())
+    assert resolved is False
 
 
 class _SequenceStubRuntime:

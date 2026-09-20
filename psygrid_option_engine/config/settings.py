@@ -103,6 +103,21 @@ class Settings(BaseSettings):
     # --- Decision loop ---
     decision_interval_seconds: float = Field(default=15.0, gt=0)
 
+    # --- Lifecycle re-entry guard (--live mode) ---
+    # A resolved (invalidated/targeted/session-expired) setup identity must
+    # not immediately resurrect on the very next tick just because the
+    # stateless decide() function still sees the same framework/direction/
+    # structural-invalidation-level combination. The primary guard is
+    # identity-based (signals/lifecycle.py's terminal states never
+    # silently reset - a genuinely new setup gets its own key, since the
+    # key includes the numeric structural invalidation level). This
+    # cooldown is the secondary, explicit safeguard: even the *same*
+    # setup identity may only reactivate after this many seconds have
+    # passed since it went terminal, guarding against a same-level
+    # whipsaw (e.g. a stop-hit followed by an immediate re-trigger at the
+    # same structural level a tick later).
+    lifecycle_reentry_cooldown_seconds: float = Field(default=300.0, ge=0)
+
     # --- Session window overrides (see config/session.py for defaults) ---
     market_open: str = Field(default="09:15")
     market_close: str = Field(default="15:30")

@@ -43,10 +43,27 @@ class TrackedSetup:
 
 class LifecycleTracker:
     """In-memory tracker, one instance per underlying (or per process, keyed
-    by `f"{underlying}:{direction}:{framework}"`)."""
+    by `f"{underlying}:{direction}:{framework}"` - callers should include a
+    numeric identifying detail, such as the structural invalidation level,
+    when the same framework/direction could otherwise recur as a distinct
+    setup; see `run_engine.py::_lifecycle_key`).
 
-    def __init__(self) -> None:
+    A resolved (terminal) setup identity does NOT silently resurrect on
+    the next `update()` call just because the caller still sees tier-
+    worthy evidence under the same key - that was the original behavior
+    ("a concluded setup starts fresh") and it let an invalidated/targeted
+    trade immediately re-register as active on the very next tick. The
+    primary guard against that is identity: a genuinely new setup (a
+    different structural level, different framework/direction) gets its
+    own key automatically. `reentry_cooldown_seconds` is the secondary,
+    explicit safeguard - even the exact same key may only leave a
+    terminal state after this many seconds have passed since it entered
+    one, guarding against a same-level whipsaw.
+    """
+
+    def __init__(self, *, reentry_cooldown_seconds: float = 0.0) -> None:
         self._tracked: dict[str, TrackedSetup] = {}
+        self._reentry_cooldown_seconds = reentry_cooldown_seconds
 
     def update(
         self,
@@ -59,7 +76,18 @@ class LifecycleTracker:
     ) -> LifecycleState:
         existing = self._tracked.get(key)
         if existing is not None and existing.state in _TERMINAL_STATES:
-            existing = None  # a concluded setup starts fresh rather than resurrecting a terminal state
+            elapsed = (as_of - existing.last_seen).total_seconds()
+            if elapsed >= self._reentry_cooldown_seconds:
+                existing = None  # cooldown elapsed - this identity may start fresh again
+            elif not (invalidated or targeted):
+                # Still cooling down: stay terminal rather than resurrecting
+                # mid-lifecycle. A fresh invalidated/targeted call is still
+                # honored below (idempotent - it's already terminal).
+                self._tracked[key] = TrackedSetup(
+                    key=key, state=existing.state, tier=existing.tier,
+                    first_seen=existing.first_seen, last_seen=existing.last_seen,
+                )
+                return existing.state
 
         if invalidated:
             new_state = LifecycleState.INVALIDATED
@@ -80,8 +108,40 @@ class LifecycleTracker:
         self._tracked[key] = TrackedSetup(key=key, state=new_state, tier=tier, first_seen=first_seen, last_seen=as_of)
         return new_state
 
+    def force_expire(self, key: str, *, as_of: datetime) -> LifecycleState:
+        """Explicit terminal transition for a reason outside the normal
+        evidence-driven lifecycle - specifically the 15:00 IST entry
+        cutoff (brief section 6): this is a signal-only engine with no
+        broker position to square off, but an internally ACTIVE setup
+        must not appear to remain live past the point real intraday risk
+        would need to be closed. Reuses the existing EXPIRED terminal
+        state rather than inventing a parallel one."""
+        existing = self._tracked.get(key)
+        if existing is not None and existing.state in _TERMINAL_STATES:
+            return existing.state
+        first_seen = existing.first_seen if existing is not None else as_of
+        tier = existing.tier if existing is not None else 0
+        self._tracked[key] = TrackedSetup(
+            key=key, state=LifecycleState.EXPIRED, tier=tier, first_seen=first_seen, last_seen=as_of
+        )
+        return LifecycleState.EXPIRED
+
     def get(self, key: str) -> TrackedSetup | None:
         return self._tracked.get(key)
+
+    def is_cooling_down(self, key: str, *, as_of: datetime) -> bool:
+        """True if this exact setup identity is currently in a terminal
+        state and the reentry cooldown has not yet elapsed - callers that
+        register/activate a setup (e.g. `run_engine.py`'s active-trade
+        monitoring) should skip doing so while this is True, rather than
+        only checking `get(key).state` directly, since a terminal
+        `TrackedSetup` alone does not reflect whether the cooldown clock
+        has actually run out."""
+        existing = self._tracked.get(key)
+        if existing is None or existing.state not in _TERMINAL_STATES:
+            return False
+        elapsed = (as_of - existing.last_seen).total_seconds()
+        return elapsed < self._reentry_cooldown_seconds
 
     def is_repeat(self, key: str, tier: int) -> bool:
         """True if this (key, tier) was already reported in an

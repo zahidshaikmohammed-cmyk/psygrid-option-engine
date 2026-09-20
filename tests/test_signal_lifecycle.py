@@ -48,14 +48,102 @@ def test_target_overrides_tier() -> None:
     assert state is LifecycleState.TARGET
 
 
-def test_terminal_state_resets_on_next_update() -> None:
+def test_terminal_state_resets_after_cooldown_elapses() -> None:
+    # Default reentry_cooldown_seconds=0.0 (no cooldown configured) - the
+    # identity may start fresh again as soon as any time has passed.
     tracker = LifecycleTracker()
     key = "k"
     tracker.update(key=key, tier=3, as_of=T0)
     tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1), invalidated=True)
-    # a fresh setup on the same key starts over, not resurrected mid-lifecycle
     state = tracker.update(key=key, tier=2, as_of=T0 + timedelta(minutes=5))
     assert state is LifecycleState.TRIGGERED
+
+
+def test_terminal_state_does_not_resurrect_immediately_with_cooldown() -> None:
+    # Production hardening requirement (section 7): a resolved setup must
+    # not immediately resurrect. With an explicit cooldown configured, the
+    # very next tick after invalidation must NOT re-trigger even though
+    # the caller still reports tier-worthy evidence under the same key.
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    key = "k"
+    tracker.update(key=key, tier=3, as_of=T0)
+    tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1), invalidated=True)
+    state = tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1, seconds=15))
+    assert state is LifecycleState.INVALIDATED  # still cooling down, not resurrected
+    assert tracker.get(key).state is LifecycleState.INVALIDATED
+
+
+def test_terminal_state_resurrects_once_cooldown_elapses() -> None:
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    key = "k"
+    tracker.update(key=key, tier=3, as_of=T0)
+    tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1), invalidated=True)
+    state = tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=6, seconds=1))
+    assert state is LifecycleState.TRIGGERED
+
+
+def test_different_structural_level_is_a_different_identity_not_gated_by_cooldown() -> None:
+    # A genuinely new setup (a different key - e.g. a new structural
+    # invalidation level) must never be blocked by another key's cooldown.
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    tracker.update(key="NIFTY:CALL:TREND:24400", tier=3, as_of=T0)
+    tracker.update(key="NIFTY:CALL:TREND:24400", tier=3, as_of=T0 + timedelta(minutes=1), invalidated=True)
+    state = tracker.update(key="NIFTY:CALL:TREND:24550", tier=2, as_of=T0 + timedelta(minutes=1, seconds=5))
+    assert state is LifecycleState.TRIGGERED
+
+
+def test_force_expire_sets_expired_state() -> None:
+    tracker = LifecycleTracker()
+    key = "k"
+    tracker.update(key=key, tier=3, as_of=T0)
+    state = tracker.force_expire(key, as_of=T0 + timedelta(minutes=1))
+    assert state is LifecycleState.EXPIRED
+    assert tracker.get(key).state is LifecycleState.EXPIRED
+
+
+def test_force_expire_on_unknown_key_still_creates_expired_entry() -> None:
+    tracker = LifecycleTracker()
+    state = tracker.force_expire("never-seen", as_of=T0)
+    assert state is LifecycleState.EXPIRED
+    assert tracker.get("never-seen").state is LifecycleState.EXPIRED
+
+
+def test_force_expire_does_not_override_an_existing_terminal_state() -> None:
+    tracker = LifecycleTracker()
+    key = "k"
+    tracker.update(key=key, tier=3, as_of=T0)
+    tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1), targeted=True)
+    tracker.force_expire(key, as_of=T0 + timedelta(minutes=2))
+    # already resolved via TARGET - force_expire must not relabel it EXPIRED
+    assert tracker.get(key).state is LifecycleState.TARGET
+
+
+def test_is_cooling_down_true_immediately_after_terminal_state() -> None:
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    key = "k"
+    tracker.update(key=key, tier=3, as_of=T0)
+    tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1), invalidated=True)
+    assert tracker.is_cooling_down(key, as_of=T0 + timedelta(minutes=1, seconds=1)) is True
+
+
+def test_is_cooling_down_false_after_cooldown_elapses() -> None:
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    key = "k"
+    tracker.update(key=key, tier=3, as_of=T0)
+    tracker.update(key=key, tier=3, as_of=T0 + timedelta(minutes=1), invalidated=True)
+    assert tracker.is_cooling_down(key, as_of=T0 + timedelta(minutes=6, seconds=1)) is False
+
+
+def test_is_cooling_down_false_for_unknown_key() -> None:
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    assert tracker.is_cooling_down("never-seen", as_of=T0) is False
+
+
+def test_is_cooling_down_false_for_non_terminal_state() -> None:
+    tracker = LifecycleTracker(reentry_cooldown_seconds=300.0)
+    key = "k"
+    tracker.update(key=key, tier=2, as_of=T0)  # TRIGGERED, not terminal
+    assert tracker.is_cooling_down(key, as_of=T0) is False
 
 
 def test_is_repeat_true_for_unchanged_active_setup() -> None:

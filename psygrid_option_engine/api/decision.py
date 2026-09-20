@@ -22,8 +22,10 @@ from psygrid_option_engine.domain.evidence import EvidenceItem, EvidenceStance
 from psygrid_option_engine.domain.snapshot import MarketSnapshot
 from psygrid_option_engine.domain.timeframe import Timeframe
 from psygrid_option_engine.execution.engine import ExecutionResult, engineer_trade
-from psygrid_option_engine.market.breadth import analyze_breadth
-from psygrid_option_engine.market.futures_analysis import analyze_futures
+from psygrid_option_engine.market.breadth import BreadthEvidence, analyze_breadth
+from psygrid_option_engine.market.context import ContextAssessment, analyze_context
+from psygrid_option_engine.market.divergence import detect_divergences
+from psygrid_option_engine.market.futures_analysis import FuturesEvidence, analyze_futures
 from psygrid_option_engine.market.indicators import atr as atr_series
 from psygrid_option_engine.market.momentum import (
     ImpulseMetrics,
@@ -128,6 +130,11 @@ def decide(snapshot: MarketSnapshot, *, settings: Settings | None = None) -> Sig
         range_model=range_model,
     )
 
+    # Not direction-specific (delayed macro series / news are the same
+    # regardless of which side is being evaluated) - computed once and
+    # reused per direction.
+    context_assessment = analyze_context(snapshot.global_context, snapshot.news, as_of=snapshot.as_of)
+
     evidence_by_direction: dict[Direction, list[EvidenceItem]] = {}
     liquidity_quality_by_direction: dict[Direction, str] = {}
     selection_by_direction: dict[Direction, SelectionResult] = {}
@@ -146,6 +153,7 @@ def decide(snapshot: MarketSnapshot, *, settings: Settings | None = None) -> Sig
             impulse=impulse,
             momentum_quality=momentum_quality,
             selection=selection,
+            context=context_assessment,
         )
 
     independent_streams = structure_analysis.regime.independent_streams + sum(
@@ -302,6 +310,34 @@ def _depth_evidence(selection: SelectionResult) -> EvidenceItem:
     return EvidenceItem("option_depth", stance, f"selected contract liquidity: {quality}")
 
 
+def _context_evidence(context: ContextAssessment) -> EvidenceItem:
+    if context.event_risk_flag:
+        # A known scheduled/breaking macro event is a genuine reason for
+        # caution regardless of direction - this is the one place
+        # analyze_context's event_risk_flag actually gets acted on, rather
+        # than computed and silently discarded.
+        return EvidenceItem(
+            "global_context", EvidenceStance.CONFLICTING, "event-risk flagged: " + "; ".join(context.notes)
+        )
+    detail = "; ".join(context.notes) if context.notes else "no macro/news context available"
+    return EvidenceItem("global_context", context.stance, detail)
+
+
+def _divergence_evidence(
+    *,
+    price_change_pct: float | None,
+    breadth_ev: BreadthEvidence,
+    impulse: ImpulseMetrics | None,
+    futures_ev: FuturesEvidence,
+    direction: Direction,
+) -> list[EvidenceItem]:
+    divergences = detect_divergences(
+        price_change_pct=price_change_pct, breadth=breadth_ev, momentum=impulse, futures=futures_ev,
+        direction=direction,
+    )
+    return [EvidenceItem(f"divergence:{d.kind.value}", EvidenceStance.CONFLICTING, d.description) for d in divergences]
+
+
 def _direction_evidence(
     snapshot: MarketSnapshot,
     *,
@@ -311,6 +347,7 @@ def _direction_evidence(
     impulse: ImpulseMetrics | None,
     momentum_quality: MomentumQuality | None,
     selection: SelectionResult,
+    context: ContextAssessment,
 ) -> list[EvidenceItem]:
     futures_ev = analyze_futures(
         snapshot.futures, underlying_ltp=underlying_ltp, price_change_pct=price_change_pct, direction=direction
@@ -320,13 +357,21 @@ def _direction_evidence(
         snapshot.breadth, snapshot.sectors, direction=direction, underlying=snapshot.underlying
     )
 
-    return [
+    items = [
         EvidenceItem("futures", futures_ev.stance, futures_ev.detail),
         EvidenceItem("option_chain", chain_ev.stance, chain_ev.detail),
         EvidenceItem("breadth", breadth_ev.stance, breadth_ev.detail),
         _momentum_evidence(impulse, momentum_quality, direction),
         _depth_evidence(selection),
+        _context_evidence(context),
     ]
+    items.extend(
+        _divergence_evidence(
+            price_change_pct=price_change_pct, breadth_ev=breadth_ev, impulse=impulse, futures_ev=futures_ev,
+            direction=direction,
+        )
+    )
+    return items
 
 
 def _range_source(range_model: RangeModel) -> str | None:
