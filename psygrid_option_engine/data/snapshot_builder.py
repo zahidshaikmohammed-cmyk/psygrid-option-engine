@@ -1,12 +1,22 @@
 """Adapter: `RawFetchBundle` (raw upstream JSON + fetch metadata) ->
 canonical `domain.snapshot.MarketSnapshot`.
 
-THIS IS THE ONE MODULE THAT KNOWS ABOUT RAW UPSTREAM FIELD NAMES, and per
-docs/ENDPOINTS.md those names are unverified (best-guess from the task
-brief, not an inspected production payload). Every alias list below is
-that best guess. When `artifacts/production_endpoint_samples.json` (or
-equivalent) is available, this is the only file that needs correcting —
-`domain/snapshot.py` and everything built on it does not change.
+THIS IS THE ONE MODULE THAT KNOWS ABOUT RAW UPSTREAM FIELD NAMES. As of
+2026-09-19, `artifacts/production_endpoint_samples.json` (real payloads
+captured from Oracle via `scripts/probe_upstream.py`, market CLOSED at
+capture time) verified the field-name contract for: underlying, options,
+depth, market_breadth, sectors (container only — item shape was empty in
+the sample), india_vix and global_context. The alias tables below were
+corrected against that sample, and `options`/`depth`/`global_context`/
+`market_breadth` were rewritten to match the real (not guessed) shape —
+see each function's docstring for what was verified vs. still inferred.
+`futures`, `indicators`, and `rbi_news` returned HTTP 503 at capture time
+(no real sample exists for them yet) and remain best-guess/unverified, as
+does anything only observable with the market open (a populated LTP,
+non-empty candle bars, a non-empty depth level, a populated `sectors`
+item). When a fresh sample closes those gaps, this is still the only file
+that needs correcting — `domain/snapshot.py` and everything built on it
+does not change.
 
 Design rule enforced throughout: a wrong guess about a field name must
 degrade to "field unavailable" (a missing `SourcedField`), never raise and
@@ -61,10 +71,9 @@ _DELTA_ALIASES = ("delta",)
 _GAMMA_ALIASES = ("gamma",)
 _THETA_ALIASES = ("theta",)
 _VEGA_ALIASES = ("vega",)
-_BID_ALIASES = ("bid", "bid_price", "best_bid")
-_ASK_ALIASES = ("ask", "ask_price", "offer", "best_ask")
+_BID_ALIASES = ("top_bid_price", "bid", "bid_price", "best_bid")
+_ASK_ALIASES = ("top_ask_price", "ask", "ask_price", "offer", "best_ask")
 _STRIKE_ALIASES = ("strike", "strike_price")
-_OPTION_TYPE_ALIASES = ("option_type", "type", "opt_type", "right")
 _EXPIRY_ALIASES = ("expiry", "expiry_date", "expiryDate")
 _SECURITY_ID_ALIASES = ("security_id", "securityid", "id", "token", "instrument_token")
 _SYMBOL_ALIASES = ("symbol", "trading_symbol", "tradingsymbol")
@@ -72,7 +81,18 @@ _SYMBOL_ALIASES = ("symbol", "trading_symbol", "tradingsymbol")
 _PREV_DAY_ALIASES = ("prev_day", "previous_day", "prevday", "prev_day_ohlc")
 _PREV_WEEK_ALIASES = ("prev_week", "previous_week", "prevweek", "prev_week_ohlc")
 
-_LIST_CONTAINER_ALIASES = ("data", "results", "items", "chain", "strikes", "options", "records", "legs")
+_LIST_CONTAINER_ALIASES = (
+    "data",
+    "results",
+    "items",
+    "chain",
+    "strikes",
+    "options",
+    "records",
+    "legs",
+    "contracts",
+    "sectors",
+)
 
 _CANDLE_TIMEFRAME_ALIASES: dict[Timeframe, tuple[str, ...]] = {
     Timeframe.M1: ("candles_1m", "ohlc_1m", "intraday_1m", "1m", "candles1m"),
@@ -252,51 +272,86 @@ def _build_futures(result: EndpointFetchResult | None, *, as_of: datetime) -> Fu
     return FuturesSnapshot(underlying=underlying, legs=tuple(legs))
 
 
-def _normalize_option_type(raw: Any) -> OptionType | None:
-    if not isinstance(raw, str):
-        return None
-    text = raw.strip().upper()
-    if text in ("CE", "CALL", "C"):
-        return "CE"
-    if text in ("PE", "PUT", "P"):
-        return "PE"
-    return None
+def _oi_change_from_previous(leg_data: Mapping[str, Any], *, source: str, kw: dict[str, Any]) -> SourcedField[float]:
+    """Real payload has `oi` and `previous_oi` but no direct oi-change field
+    - both are genuine observed values from the same fetch, so computing
+    their difference is arithmetic on real data, not a fabricated value."""
+    oi = _as_float(_get_alias(leg_data, _OI_ALIASES))
+    previous_oi = _as_float(_get_alias(leg_data, ("previous_oi",)))
+    if oi is None or previous_oi is None:
+        return SourcedField.missing(source)
+    return SourcedField.of(oi - previous_oi, source=source, **kw)
+
+
+def _build_option_leg(
+    leg_data: Mapping[str, Any],
+    *,
+    security_id: Any,
+    strike: float,
+    option_type: OptionType,
+    expiry: date | None,
+    kw: dict[str, Any],
+) -> OptionLeg:
+    return OptionLeg(
+        security_id=str(security_id or ""),
+        symbol=str(_get_alias(leg_data, _SYMBOL_ALIASES) or ""),
+        strike=strike,
+        option_type=option_type,
+        expiry=expiry,
+        ltp=_sf(leg_data, _LTP_ALIASES, source="options:ltp", **kw),
+        bid=_sf(leg_data, _BID_ALIASES, source="options:bid", **kw),
+        ask=_sf(leg_data, _ASK_ALIASES, source="options:ask", **kw),
+        volume=_sf(leg_data, _VOLUME_ALIASES, source="options:volume", **kw),
+        oi=_sf(leg_data, _OI_ALIASES, source="options:oi", **kw),
+        oi_change=_oi_change_from_previous(leg_data, source="options:oi_change", kw=kw),
+        iv=_sf(leg_data, _IV_ALIASES, source="options:iv", **kw),
+        delta=_sf(leg_data.get("greeks") or leg_data, _DELTA_ALIASES, source="options:delta", **kw),
+        gamma=_sf(leg_data.get("greeks") or leg_data, _GAMMA_ALIASES, source="options:gamma", **kw),
+        theta=_sf(leg_data.get("greeks") or leg_data, _THETA_ALIASES, source="options:theta", **kw),
+        vega=_sf(leg_data.get("greeks") or leg_data, _VEGA_ALIASES, source="options:vega", **kw),
+    )
 
 
 def _build_options(
     result: EndpointFetchResult | None, *, underlying: str, as_of: datetime
 ) -> OptionChainSnapshot | None:
-    if result is None or result.data is None:
+    """Verified against `artifacts/production_endpoint_samples.json`
+    (2026-09-19): the real payload nests each strike as
+    `{"strike": <float>, "ce": {...}, "pe": {...}}` inside a top-level
+    `strikes` list, with `delta/gamma/theta/vega` further nested one level
+    under `ce`/`pe`'s own `greeks` dict, and a single `expiry` (ISO date)
+    shared by the whole chain at the payload's top level - there is no
+    per-leg expiry field. This replaces the original guess of a flat list
+    of legs each carrying their own `option_type`/`expiry`, which matched
+    nothing in the real payload and silently produced zero legs.
+    """
+    if result is None or result.data is None or not isinstance(result.data, dict):
         return None
-    items = _extract_list(result.data)
+    payload = result.data
+    chain_expiry = _as_date(_get_alias(payload, _EXPIRY_ALIASES))
+    items = _extract_list(payload)
     kw = dict(observed_at=result.observed_at, fetched_at=result.fetched_at)
 
     legs: list[OptionLeg] = []
     for item in items:
         strike = _as_float(_get_alias(item, _STRIKE_ALIASES))
-        option_type = _normalize_option_type(_get_alias(item, _OPTION_TYPE_ALIASES))
-        if strike is None or option_type is None:
+        if strike is None:
             continue
-        legs.append(
-            OptionLeg(
-                security_id=str(_get_alias(item, _SECURITY_ID_ALIASES) or ""),
-                symbol=str(_get_alias(item, _SYMBOL_ALIASES) or ""),
-                strike=strike,
-                option_type=option_type,
-                expiry=_as_date(_get_alias(item, _EXPIRY_ALIASES)),
-                ltp=_sf(item, _LTP_ALIASES, source="options:ltp", **kw),
-                bid=_sf(item, _BID_ALIASES, source="options:bid", **kw),
-                ask=_sf(item, _ASK_ALIASES, source="options:ask", **kw),
-                volume=_sf(item, _VOLUME_ALIASES, source="options:volume", **kw),
-                oi=_sf(item, _OI_ALIASES, source="options:oi", **kw),
-                oi_change=_sf(item, _OI_CHANGE_ALIASES, source="options:oi_change", **kw),
-                iv=_sf(item, _IV_ALIASES, source="options:iv", **kw),
-                delta=_sf(item, _DELTA_ALIASES, source="options:delta", **kw),
-                gamma=_sf(item, _GAMMA_ALIASES, source="options:gamma", **kw),
-                theta=_sf(item, _THETA_ALIASES, source="options:theta", **kw),
-                vega=_sf(item, _VEGA_ALIASES, source="options:vega", **kw),
+
+        ce = item.get("ce")
+        if isinstance(ce, dict):
+            legs.append(
+                _build_option_leg(
+                    ce, security_id=ce.get("security_id"), strike=strike, option_type="CE", expiry=chain_expiry, kw=kw
+                )
             )
-        )
+        pe = item.get("pe")
+        if isinstance(pe, dict):
+            legs.append(
+                _build_option_leg(
+                    pe, security_id=pe.get("security_id"), strike=strike, option_type="PE", expiry=chain_expiry, kw=kw
+                )
+            )
     return OptionChainSnapshot(underlying=underlying, legs=tuple(legs))
 
 
@@ -318,6 +373,18 @@ def _build_depth_levels(raw: Any) -> tuple[DepthLevel, ...]:
 
 
 def _build_depth(result: EndpointFetchResult | None, *, underlying: str) -> DepthSnapshot | None:
+    """Verified against `artifacts/production_endpoint_samples.json`
+    (2026-09-19): the real payload's per-underlying container is a
+    top-level `contracts` list (now in `_LIST_CONTAINER_ALIASES`), and each
+    contract carries singular `bid`/`ask` keys (not `bids`/`asks`) holding
+    a 20-level array of `{level, orders, price, quantity}` - `price`/
+    `quantity`/`orders` matched the original guess. Each contract also
+    carries its own `oi`/`volume`/`last_price`/`ohlc`/`strike`/
+    `option_type`/`expiry`, which this function does not surface (depth is
+    modeled as bid/ask microstructure only - see `domain/snapshot.py`
+    `InstrumentDepth`); the `options` endpoint remains the source for
+    those fields.
+    """
     if result is None or result.data is None:
         return None
     data = result.data
@@ -340,8 +407,8 @@ def _build_depth(result: EndpointFetchResult | None, *, underlying: str) -> Dept
         security_id = str(_get_alias(entry, _SECURITY_ID_ALIASES) or "")
         if not security_id:
             continue
-        bids_raw = _get_alias(entry, ("bids", "bid_levels", "buy"))
-        asks_raw = _get_alias(entry, ("asks", "ask_levels", "sell"))
+        bids_raw = _get_alias(entry, ("bid", "bids", "bid_levels", "buy"))
+        asks_raw = _get_alias(entry, ("ask", "asks", "ask_levels", "sell"))
         by_id[security_id] = InstrumentDepth(
             security_id=security_id,
             bids=_build_depth_levels(bids_raw),
@@ -352,13 +419,18 @@ def _build_depth(result: EndpointFetchResult | None, *, underlying: str) -> Dept
 
 
 def _build_breadth(result: EndpointFetchResult | None) -> BreadthSnapshot | None:
+    """Verified against `artifacts/production_endpoint_samples.json`
+    (2026-09-19): the real keys are `advancing`/`declining` (full words),
+    not the originally-guessed `advances`/`declines` abbreviations;
+    `unchanged` matched as guessed.
+    """
     if result is None or result.data is None or not isinstance(result.data, dict):
         return None
     d = result.data
     kw = dict(observed_at=result.observed_at, fetched_at=result.fetched_at)
     return BreadthSnapshot(
-        advances=_sf(d, ("advances", "advance", "adv"), source="breadth:advances", **kw),
-        declines=_sf(d, ("declines", "decline", "dec"), source="breadth:declines", **kw),
+        advances=_sf(d, ("advancing", "advances", "advance", "adv"), source="breadth:advances", **kw),
+        declines=_sf(d, ("declining", "declines", "decline", "dec"), source="breadth:declines", **kw),
         unchanged=_sf(d, ("unchanged", "unch"), source="breadth:unchanged", **kw),
     )
 
@@ -398,21 +470,31 @@ def _build_vix(result: EndpointFetchResult | None) -> VixSnapshot | None:
 
 
 def _build_global_context(result: EndpointFetchResult | None) -> tuple[GlobalContextSeries, ...]:
-    if result is None or result.data is None:
+    """Verified against `artifacts/production_endpoint_samples.json`
+    (2026-09-19): the real series (sp500, us_10y_yield, usd_inr, vix,
+    wti_crude_oil in the sample) live nested under a top-level `series`
+    dict, alongside sibling metadata keys (`market_data_status`,
+    `not_available`, `refresh_seconds`, ...) that are not series and were
+    previously being misread as one each. This replaces the original guess
+    of the whole payload being a flat name->value map.
+    """
+    if result is None or result.data is None or not isinstance(result.data, dict):
         return ()
-    d = result.data
+    payload = result.data
     kw = dict(observed_at=result.observed_at, fetched_at=result.fetched_at)
-    series: list[GlobalContextSeries] = []
+    series_map = payload.get("series")
+    if not isinstance(series_map, dict):
+        return ()
 
-    if isinstance(d, dict):
-        for name, value in d.items():
-            if isinstance(value, dict):
-                v = _sf(value, ("value", *_LTP_ALIASES), source=f"global_context:{name}", **kw)
-                source_date = _as_date(_get_alias(value, ("source_date", "date", "as_of")))
-            else:
-                v = _sf({"value": value}, ("value",), source=f"global_context:{name}", **kw)
-                source_date = None
-            series.append(GlobalContextSeries(name=str(name), value=v, source_date=source_date))
+    series: list[GlobalContextSeries] = []
+    for name, value in series_map.items():
+        if isinstance(value, dict):
+            v = _sf(value, ("value", *_LTP_ALIASES), source=f"global_context:{name}", **kw)
+            source_date = _as_date(_get_alias(value, ("source_date", "date", "as_of")))
+        else:
+            v = _sf({"value": value}, ("value",), source=f"global_context:{name}", **kw)
+            source_date = None
+        series.append(GlobalContextSeries(name=str(name), value=v, source_date=source_date))
     return tuple(series)
 
 

@@ -67,25 +67,28 @@ def test_unknown_field_names_degrade_to_unavailable_not_crash() -> None:
 
 
 def test_option_leg_parsing_and_type_normalization() -> None:
+    # Real payload shape verified against artifacts/production_endpoint_samples.json
+    # (2026-09-19): strikes is a list of {strike, ce, pe}, expiry is
+    # chain-level, greeks are nested under ce/pe's own "greeks" dict.
     bundle = _minimal_bundle(
         options=_result(
             "options",
             EndpointCriticality.CRITICAL,
             {
-                "data": [
+                "expiry": "2026-09-25",
+                "strikes": [
                     {
                         "strike": 24500,
-                        "option_type": "CALL",
-                        "expiry": "2026-09-25",
-                        "ltp": 120.5,
-                        "bid": 119,
-                        "ask": 121,
-                        "delta": 0.55,
-                        "security_id": "ABC123",
+                        "ce": {
+                            "last_price": 120.5,
+                            "top_bid_price": 119,
+                            "top_ask_price": 121,
+                            "greeks": {"delta": 0.55},
+                            "security_id": "ABC123",
+                        },
+                        "pe": {"last_price": 80, "security_id": "ABC124"},
                     },
-                    {"strike": 24600, "option_type": "PE", "ltp": 80},
-                    {"strike": 24700},  # missing option_type -> dropped
-                ]
+                ],
             },
         )
     )
@@ -96,6 +99,8 @@ def test_option_leg_parsing_and_type_normalization() -> None:
     assert ce is not None
     assert ce.delta.value == 0.55
     assert ce.spread == 2.0
+    assert ce.expiry is not None
+    assert ce.expiry.isoformat() == "2026-09-25"
 
 
 def test_option_missing_greeks_marked_unavailable_not_zero() -> None:
@@ -103,7 +108,7 @@ def test_option_missing_greeks_marked_unavailable_not_zero() -> None:
         options=_result(
             "options",
             EndpointCriticality.CRITICAL,
-            {"data": [{"strike": 24500, "option_type": "CE", "ltp": 100}]},
+            {"expiry": "2026-09-25", "strikes": [{"strike": 24500, "ce": {"last_price": 100}}]},
         )
     )
     snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())
@@ -153,11 +158,13 @@ def test_candles_filtered_against_as_of_no_lookahead() -> None:
 
 
 def test_global_context_preserves_source_date_separately() -> None:
+    # Real payload nests series under a top-level "series" key - see
+    # artifacts/production_endpoint_samples.json (2026-09-19).
     bundle = _minimal_bundle(
         global_context=_result(
             "global_context",
             EndpointCriticality.OPTIONAL,
-            {"SP500": {"value": 5000, "source_date": "2026-09-17"}},
+            {"series": {"SP500": {"value": 5000, "source_date": "2026-09-17"}}},
         )
     )
     snap = build_market_snapshot(bundle, as_of=NOW, settings=Settings())

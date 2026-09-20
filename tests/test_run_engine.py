@@ -206,7 +206,10 @@ def _options_bundle(security_id: str, ltp: float, *, as_of: datetime) -> RawFetc
     result = EndpointFetchResult(
         logical_name="options", url="/public/nifty-options.json", criticality=EndpointCriticality.CRITICAL,
         requested_at=as_of, fetched_at=as_of, latency_ms=1.0, http_status=200,
-        data={"data": [{"strike": 24550, "option_type": "CE", "security_id": security_id, "ltp": ltp}]},
+        data={
+            "expiry": "2026-09-25",
+            "strikes": [{"strike": 24550, "ce": {"security_id": security_id, "last_price": ltp}}],
+        },
         observed_at=as_of, issues=(), error=None,
     )
     return RawFetchBundle(underlying="NIFTY", requested_at=as_of, results={"options": result})

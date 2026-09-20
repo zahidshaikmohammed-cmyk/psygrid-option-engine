@@ -1,15 +1,46 @@
 # PSYGRID upstream data contract
 
-## ⚠️ Verification status
+## ✅ Verification status (updated 2026-09-19)
 
-**This contract has NOT been verified against a live upstream response.**
-The sandbox this repository was built in has no route to
-`http://140.245.226.102:10000` (outbound network here is HTTPS-only through
-an egress proxy; plain HTTP to that IP times out). Everything below is
-transcribed from the endpoint list and field descriptions given in the task
-brief, not from an inspected payload.
+**This contract has been partially verified against a real upstream
+response.** `artifacts/production_endpoint_samples.json` was captured from
+the Oracle host via `scripts/probe_upstream.py` on 2026-09-19 (market
+CLOSED at capture time). `psygrid_option_engine/data/snapshot_builder.py`
+has been corrected against it and `tests/test_production_contract.py`
+replays the real captured bytes through the adapter as a permanent
+regression check.
 
-Consequences of this, by design:
+**Verified** (real sample obtained, adapter corrected and tested against
+it): `underlying`, `options`, `depth`, `market_breadth`, `sectors`
+(container shape only — the sample's `sectors` list itself was empty, so
+per-item field names remain unconfirmed), `india_vix`, `global_context`.
+
+**Still unverified** (endpoint returned HTTP 503 at capture time — no real
+sample exists yet): `futures`, `indicators`, `rbi_news`. These three keep
+their original best-guess field names below; treat any live run depending
+on them as unverified until a fresh probe captures them with the market
+open (503 strongly suggests these generators only run intraday).
+
+**Also unverified even for the "verified" endpoints above**: anything only
+observable with the market open — a populated (non-null) LTP, non-empty
+intraday candle bars, non-zero depth levels, a populated `sectors` array
+entry. The 2026-09-19 sample was captured on a closed market, so those
+specific values were `null`/empty/zero in the real payload and the adapter
+correctly reports them as unavailable rather than guessing — but the
+*field names themselves* (verified from the schema/keys present, and from
+non-zero option-chain OI/greeks/quotes which the payload did carry even
+closed) are confirmed.
+
+See `psygrid_option_engine/data/snapshot_builder.py`'s module docstring
+and each `_build_*` function's docstring for the specific real shape vs.
+what was originally guessed, and `docs/PHASES.md` for the full list of
+concrete bugs this fixed (options chain parsing to zero legs, depth
+parsing to zero entries, global_context reading metadata keys instead of
+the real nested series, market_breadth's advancing/declining field names).
+
+The remaining unverified endpoints still follow the same design
+discipline that made this correction a localized fix rather than a
+rewrite:
 
 1. `data/models.py` response models use `extra="allow"` and treat almost
    every field as `Optional` — the client must not crash or silently
@@ -20,13 +51,10 @@ Consequences of this, by design:
    **semantic** assumptions (this repo does not hard-code e.g. a specific
    strike-step or lot size — those must come from data or documented
    config, per section 3 of the brief).
-3. Before Phase 3 (canonical `MarketSnapshot`) is built against real field
-   names, **someone with network access to the upstream host should run
-   `scripts/probe_upstream.py` (added in this phase) and commit the
-   captured sample payloads** so the models can be corrected against
-   ground truth rather than assumption. Until then, treat every field name
-   below as "best guess, pending confirmation." See "Oracle probe
-   procedure" below for the exact steps.
+3. For `futures`/`indicators`/`rbi_news`, treat every field name below as
+   "best guess, pending confirmation" until a fresh probe (market open)
+   captures a real sample for them. See "Oracle probe procedure" below for
+   the exact steps to re-run.
 
 ## Oracle probe procedure
 
@@ -167,32 +195,60 @@ other module may hard-code a path string.
 
 ## Field-level contract
 
-### Underlying (`nifty.json`, `banknifty.json`)
+### Underlying (`nifty.json`, `banknifty.json`) — ✅ verified 2026-09-19
 
-Assumed shape (loose): `{ "symbol", "ltp", "open", "high", "low", "close",
-"volume"?, "timestamp"/"as_of", "ohlc_1m"?/"candles_1m"? [...] }`. The brief
-lists 1m/5m/15m/1H/daily/weekly OHLC as desired but does not confirm which
-of these the raw underlying endpoint carries directly vs. which this engine
-must aggregate itself (see `market/aggregation.py`, Phase 3+). Until
-confirmed, the client treats only whatever timeframe arrays are actually
-present as source data, and everything else as aggregated-and-labeled-as-
-such.
+Real shape: `{ "symbol", "ltp", "ltp_timestamp", "security_id",
+"instrument", "exchange_segment", "schema_version", "session": {
+"current_time_ist", "date", "status", "timezone" }, "candle_source",
+"synthetic_candles", "feed": {...}, "timeframes": ["1m","5m","15m","1h"],
+"1m": [...], "5m": [...], "15m": [...], "1h": [...] }`. Candle arrays are
+**top-level keys named after the timeframe** (`"1m"`, not nested under
+`timeframes`, which is just a manifest listing which top-level keys
+exist). **There is no daily/weekly candle array and no `prev_day`/
+`prev_week` OHLC field at all** — confirmed absent, not merely unpopulated
+— so `current_week_high/low`, a genuine daily ATR, and day-over-day
+comparisons must come from accumulated history (`replay/` or a future live
+accumulation loop), never a raw field. There is also **no top-level
+open/high/low/close for "today"** — `structure/levels.py` already derives
+today's high/low/open from closed M1 candles when `day_ohlc` is
+unavailable, which is exactly this case.
 
-### Options (`nifty-options.json`, `banknifty-options.json`)
+### Options (`nifty-options.json`, `banknifty-options.json`) — ✅ verified 2026-09-19
 
-Assumed shape: a list of strikes, each with CE/PE legs carrying
-`security_id, symbol, expiry, strike, ltp/premium, bid, ask, volume, oi,
-oi_change, iv, delta, gamma, theta, vega` where available. Per section 10
-of the brief, Greeks/IV may be **absent** — `data/models.py` marks these
-`Optional[float] = None` and `domain/field.py` wrapping downstream marks
-them `available=False` rather than defaulting to `0.0` (a `0.0` delta is a
-real, meaningful value and must never be confused with "missing").
+Real shape: `{ "expiry": "<ISO date>", "expiry_list": [...],
+"underlying_ltp", "analytics": {...}, "strikes": [ { "strike": <float>,
+"ce": {...}, "pe": {...} }, ... ] }`. Each `ce`/`pe` leg carries
+`security_id, last_price, top_bid_price, top_bid_quantity, top_ask_price,
+top_ask_quantity, oi, previous_oi, volume, previous_volume,
+average_price, previous_close_price, implied_volatility, greeks: {delta,
+gamma, theta, vega}`. Notably:
+- **`expiry` is chain-level, not per-leg** — the whole payload is a single
+  expiry's chain; there is no per-leg expiry field.
+- **Greeks are nested one level deeper** under `ce.greeks`/`pe.greeks`,
+  not flat on the leg.
+- **No direct `oi_change` field** — the adapter computes it as
+  `oi - previous_oi` (real arithmetic on real observed values, not a
+  fabrication).
+- No `symbol` field on the leg itself.
+- IV/Greeks were present (non-null, non-zero) even with the market closed
+  in the captured sample, so their absence when populated would be a
+  genuine data-quality signal, not an artifact of market hours.
 
-### Depth (`*-depth.json`)
+### Depth (`*-depth.json`) — ✅ verified 2026-09-19
 
-Assumed shape: best bid/ask ladders (N levels) per instrument, keyed by
-`security_id`. Used for spread/liquidity checks in `risk/`, not decision
-logic on its own.
+Real shape: `{ "underlying_ltp", "underlying_security_id", "depth_levels":
+20, "contracts": [ { "security_id", "strike", "option_type", "expiry",
+"last_price", "oi", "volume", "average_price", "ohlc": {open,high,low,
+close}, "buy_quantity", "sell_quantity", "crossed_book",
+"bid": [ {level, price, quantity, orders} × 20 ], "ask": [ ... × 20 ] },
+... ] }`. The container key is `contracts` (not `data`/`results`/...), and
+bid/ask are **singular** (`bid`/`ask`, not `bids`/`asks`). Each depth
+level's own `price`/`quantity`/`orders` field names matched the original
+guess. The adapter only extracts `bid`/`ask` ladders per `security_id`
+into `InstrumentDepth` (per `domain/snapshot.py`) — the contract's own
+`oi`/`volume`/`last_price`/`ohlc`/`strike`/`option_type`/`expiry` fields
+are not surfaced here since that data already comes from the `options`
+endpoint; depth is deliberately kept to bid/ask microstructure only.
 
 ### Indicators (`*-indicators.json`)
 
@@ -208,25 +264,47 @@ Assumed shape: `{ expiry, ltp, oi, oi_change, volume, bid, ask, ohlc }` per
 expiry. Used for basis and participation evidence in `structure/` and
 `authorization/` (Phase 4/5), not for option selection directly.
 
-### Breadth / sectors (`market-breadth.json`, `sectors.json`)
+### Breadth / sectors (`market-breadth.json`, `sectors.json`) — ✅ verified 2026-09-19
 
-Assumed shape: advance/decline counts and sector index moves. Contextual
-evidence only in `authorization/`.
+`market_breadth` real shape: `{ "as_of", "advancing", "declining",
+"unchanged", "advance_decline_ratio", "constituents": [...],
+"coverage_count", "new_session_highs", "new_session_lows",
+"universe_size" }`. **Real keys are `advancing`/`declining` (full words)**,
+not the originally-guessed `advances`/`declines` abbreviations.
 
-### `indiavix.json`
+`sectors` real shape: `{ "as_of", "sector_count", "sectors": [...],
+"universe_size" }` — container key `sectors` confirmed (now in the
+adapter's list-container aliases); the captured sample's `sectors` array
+was itself empty (market closed), so per-item field names
+(`name`/`change_pct` guessed) remain unconfirmed.
 
-Assumed shape: `{ value, timestamp }` or similar. Used as a volatility
-context input, never as the sole volatility measure (ATR/realized vol from
-the underlying itself is computed independently).
+### `indiavix.json` — ✅ verified 2026-09-19 (shape only; value unobserved)
 
-### `global-context.json`
+Real shape is the **same schema as the underlying endpoint** (`symbol:
+"INDIA VIX"`, `ltp`, `ltp_timestamp`, `session`, `timeframes`, per-
+timeframe candle arrays), not the originally-guessed `{ value, timestamp }`
+shell. The adapter's `ltp`-alias lookup already matches this correctly.
+`ltp` was `null` in the captured sample (market closed) so a real non-null
+VIX value has not yet been observed — used as a volatility context input,
+never as the sole volatility measure (ATR/realized vol from the underlying
+itself is computed independently).
 
-Per section 19 of the brief: delayed macro series (S&P 500, VIX, US10Y,
-WTI, USDINR) — **each series keeps its own `source_date`** and is never
-treated as live-tick data. Fields not present in this feed (DXY, NASDAQ,
-Dow, GIFT NIFTY, Gold, Asian indices) are represented as
-`SourcedField(available=False)`, never substituted with a different
-dataset.
+### `global-context.json` — ✅ verified 2026-09-19
+
+Real shape: `{ "series": { "sp500": {series_id, source, source_date,
+value}, "us_10y_yield": {...}, "usd_inr": {...}, "vix": {...},
+"wti_crude_oil": {...} }, "not_available": [...], "market_data_status",
+"refresh_seconds", "updated_at" }`. **The real series live nested under a
+top-level `series` key** — the original guess treated the whole payload as
+a flat `name -> value` map and picked up sibling metadata keys
+(`market_data_status`, `refresh_seconds`, ...) as if they were series,
+while missing the real ones entirely. `not_available` lists tickers
+PSYGRID currently has no source for (in the sample: gift_nifty, nasdaq,
+dow_jones, nikkei, hang_seng, shanghai, kospi, dxy, gold) — not consumed
+by the adapter, but useful context if a future evidence module wants to
+distinguish "this series doesn't exist right now" from "this series
+fetch failed." Per section 19 of the brief, **each series keeps its own
+`source_date`** and is never treated as live-tick data.
 
 ### `rbi-news.json`
 

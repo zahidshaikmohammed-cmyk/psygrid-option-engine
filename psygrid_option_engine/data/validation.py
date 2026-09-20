@@ -11,7 +11,7 @@ edits to `_STRUCTURAL_CHECKS` below, not a rewrite of the calling code.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from psygrid_option_engine.config.settings import Settings
@@ -24,6 +24,9 @@ from psygrid_option_engine.signals.schema import (
 )
 
 # Keys we'll look for, in order, to find a payload's own reported timestamp.
+# "ltp_timestamp" confirmed present (though null while the market was
+# closed) on the real underlying/india_vix payloads - see
+# artifacts/production_endpoint_samples.json (2026-09-19).
 _TIMESTAMP_KEYS = (
     "timestamp",
     "as_of",
@@ -31,10 +34,13 @@ _TIMESTAMP_KEYS = (
     "observed_at",
     "updated_at",
     "last_updated",
+    "ltp_timestamp",
     "source_date",
     "time",
     "date",
 )
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 # Plausible container keys for list-shaped payloads nested under a dict.
 _LIST_CONTAINER_KEYS = ("data", "results", "items", "chain", "strikes", "options", "records")
@@ -74,6 +80,17 @@ def _parse_timestamp_value(value: Any) -> datetime | None:
         text = value.strip()
         if not text:
             return None
+        # Confirmed real format (market_breadth.as_of, sectors.as_of,
+        # underlying/india_vix session.current_time_ist):
+        # "2026-09-20 00:11:38 IST" - not ISO-parseable as-is, and PSYGRID
+        # only ever means Indian Standard Time by this suffix (its own
+        # `session.timezone` field reports "Asia/Kolkata").
+        if text.endswith(" IST"):
+            try:
+                naive = datetime.strptime(text[: -len(" IST")], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+            return naive.replace(tzinfo=_IST)
         try:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:

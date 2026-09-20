@@ -14,22 +14,26 @@ tier engine, contract selection, premium execution engineering, and risk
 validation — is real, tested, deterministic logic, wired end to end
 through `run_engine.py`.
 
-**⚠️ The upstream field-name contract is still unverified against a real
-production payload** (see `docs/ENDPOINTS.md` — this sandbox has no
-network route to the production host). Everything past the one adapter
-module that knows about raw field names (`data/snapshot_builder.py`) is
-built against this engine's own canonical types and doesn't change when
-that gets corrected — but until it is, treat any live run against the real
-upstream as unverified, and do not treat its output as a trade
-recommendation. `docs/PHASES.md` has the full honest rundown of what's
-solid v1 vs. what's a known, documented gap.
+**✅ The upstream field-name contract was verified against a real
+production payload on 2026-09-19** for most endpoints (see
+`docs/ENDPOINTS.md`) — `data/snapshot_builder.py` was corrected against
+`artifacts/production_endpoint_samples.json`, with
+`tests/test_production_contract.py` replaying the real bytes as a
+permanent regression check. This closed concrete bugs where the adapter
+was silently parsing the real options chain and depth ladders to zero
+entries. `futures`, `indicators`, and `rbi_news` returned HTTP 503 at
+capture time (no real sample yet) and remain unverified; do not treat a
+live run's `futures`/`indicators`/`rbi_news`-derived evidence as
+confirmed until a fresh probe captures them with the market open.
+`docs/PHASES.md` has the full honest rundown of what's solid v1 vs. what's
+a known, documented gap.
 
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layering, information
   boundary, why the layers are split the way they are.
 - [`docs/ENDPOINTS.md`](docs/ENDPOINTS.md) — upstream data contract
-  (⚠️ unverified against live upstream — see that doc).
+  (✅ verified against a real payload for most endpoints — see that doc).
 - [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) — engine states and
   transitions.
 - [`docs/SIGNAL_SCHEMA.md`](docs/SIGNAL_SCHEMA.md) — `TRADE_READY` /

@@ -96,26 +96,31 @@ def test_favorable_conditions_reach_trade_ready() -> None:
     ltp = candles[-1]["close"]
     strike = round(ltp / 50) * 50
 
+    # Real shape verified against artifacts/production_endpoint_samples.json
+    # (2026-09-19): strikes list of {strike, ce, pe}, chain-level expiry,
+    # greeks nested under ce/pe's own "greeks" dict.
     options_data = {
-        "data": [
+        "expiry": "2026-09-25",
+        "strikes": [
             {
-                "strike": strike, "option_type": "CE", "expiry": "2026-09-25", "ltp": 120.0,
-                "bid": 119.5, "ask": 120.5, "oi": 80000, "volume": 30000, "delta": 0.5,
-                "security_id": "CE1",
+                "strike": strike,
+                "ce": {
+                    "last_price": 120.0, "top_bid_price": 119.5, "top_ask_price": 120.5,
+                    "oi": 80000, "volume": 30000, "greeks": {"delta": 0.5}, "security_id": "CE1",
+                },
+                "pe": {
+                    "last_price": 90.0, "top_bid_price": 89.5, "top_ask_price": 90.5,
+                    "oi": 20000, "volume": 5000, "greeks": {"delta": -0.5}, "security_id": "PE1",
+                },
             },
-            {
-                "strike": strike, "option_type": "PE", "expiry": "2026-09-25", "ltp": 90.0,
-                "bid": 89.5, "ask": 90.5, "oi": 20000, "volume": 5000, "delta": -0.5,
-                "security_id": "PE1",
-            },
-        ]
+        ],
     }
     depth_data = {
-        "data": [
+        "contracts": [
             {"security_id": "CE1",
-             "bids": [{"price": 119.5, "quantity": 1000}], "asks": [{"price": 120.5, "quantity": 1000}]},
+             "bid": [{"price": 119.5, "quantity": 1000}], "ask": [{"price": 120.5, "quantity": 1000}]},
             {"security_id": "PE1",
-             "bids": [{"price": 89.5, "quantity": 1000}], "asks": [{"price": 90.5, "quantity": 1000}]},
+             "bid": [{"price": 89.5, "quantity": 1000}], "ask": [{"price": 90.5, "quantity": 1000}]},
         ]
     }
 
@@ -181,16 +186,18 @@ def test_session_cutoff_blocks_new_trade_even_with_favorable_setup() -> None:
             ),
             "options": _result(
                 "options", EndpointCriticality.CRITICAL,
-                {"data": [
-                    {"strike": round(ltp / 50) * 50, "option_type": "CE", "expiry": "2026-09-25", "ltp": 120.0,
-                     "bid": 119.5, "ask": 120.5, "oi": 80000, "volume": 30000, "delta": 0.5, "security_id": "CE1"},
+                {"expiry": "2026-09-25", "strikes": [
+                    {"strike": round(ltp / 50) * 50, "ce": {
+                        "last_price": 120.0, "top_bid_price": 119.5, "top_ask_price": 120.5,
+                        "oi": 80000, "volume": 30000, "greeks": {"delta": 0.5}, "security_id": "CE1",
+                    }},
                 ]},
                 as_of=as_of,
             ),
             "depth": _result(
                 "depth", EndpointCriticality.CRITICAL,
-                {"data": [{"security_id": "CE1", "bids": [{"price": 119.5, "quantity": 1000}],
-                           "asks": [{"price": 120.5, "quantity": 1000}]}]},
+                {"contracts": [{"security_id": "CE1", "bid": [{"price": 119.5, "quantity": 1000}],
+                                "ask": [{"price": 120.5, "quantity": 1000}]}]},
                 as_of=as_of,
             ),
             "india_vix": _result("india_vix", EndpointCriticality.OPTIONAL, {"value": 80.0}, as_of=as_of),

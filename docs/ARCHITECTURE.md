@@ -11,9 +11,11 @@ premium execution engineering, and risk validation, wired end to end via
 Phase 11 (replay outcome measurement and calibration) remains partial —
 the capture/replay machinery exists and is tested, but nothing has
 measured real outcomes against it yet. See `docs/PHASES.md` for the
-phase-by-phase status and known v1 limitations (most notably: the
-upstream field-name contract is still unverified against a real
-production payload — see `docs/ENDPOINTS.md`).
+phase-by-phase status and known v1 limitations. The upstream field-name
+contract was verified against a real production payload on 2026-09-19
+(`artifacts/production_endpoint_samples.json`) and `data/snapshot_builder.py`
+was corrected accordingly — `futures`/`indicators`/`rbi_news` remain
+unverified (no real sample captured for them yet; see `docs/ENDPOINTS.md`).
 
 ## 1. Repository boundary
 
@@ -124,10 +126,10 @@ cannot alter `state`, `direction`, `contract`, or `execution` fields — see
 
 ## 7. See also
 
-- `docs/ENDPOINTS.md` — upstream data contract mapping (status: **derived
-  from the spec provided in the task, not yet verified against a live
-  response** — the sandbox this was built in cannot reach
-  `140.245.226.102:10000`; see that document's top section).
+- `docs/ENDPOINTS.md` — upstream data contract mapping (status: **verified
+  against a real production payload for most endpoints as of 2026-09-19**;
+  `futures`/`indicators`/`rbi_news` remain unverified — see that
+  document's top section).
 - `docs/STATE_MACHINE.md` — states and transitions.
 - `docs/SIGNAL_SCHEMA.md` — `TRADE_READY` / `NO_TRADE` schema.
 - `docs/PHASES.md` — phase plan and current status.

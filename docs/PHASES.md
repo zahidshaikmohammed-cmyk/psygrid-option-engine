@@ -19,15 +19,26 @@ Status legend: ✅ done · 🚧 in progress · ⬜ not started.
 
 ## Verification status — read before trusting any output
 
-**The upstream field-name contract used throughout (`data/snapshot_builder.py`'s
-alias tables) is still unverified against a real production payload** — see
-docs/ENDPOINTS.md. Nothing past that one adapter module depends on the raw
-wire format (everything else is built against the canonical
-`domain/snapshot.py::MarketSnapshot`), so correcting the contract later is a
-localized fix, not a rewrite — but until that correction happens, treat any
-live run against the real upstream as unverified. `scripts/probe_upstream.py`
-+ the Oracle procedure in docs/ENDPOINTS.md is still the way to close this
-gap; nobody has run it yet.
+**The upstream field-name contract has been verified against a real
+production payload as of 2026-09-19** — `artifacts/production_endpoint_samples.json`
+was captured from Oracle via `scripts/probe_upstream.py` (market CLOSED at
+capture time) and `data/snapshot_builder.py` was corrected against it, with
+`tests/test_production_contract.py` replaying the real bytes as a
+permanent regression check. This closed several concrete, previously-
+guessed-wrong mismatches: the options chain was parsing to **zero legs**
+(real shape is `strikes: [{strike, ce, pe}]` with chain-level expiry and
+nested `greeks`, not a flat per-leg list), depth was parsing to **zero
+entries** (real container key is `contracts`, bid/ask are singular), and
+`global_context`/`market_breadth` were reading the wrong keys entirely
+(`series` is nested; breadth fields are `advancing`/`declining`, not
+`advances`/`declines`). See docs/ENDPOINTS.md's verification-status banner
+for the full per-endpoint detail. `futures`, `indicators`, and `rbi_news`
+returned HTTP 503 at capture time (no real sample yet) and remain
+best-guess/unverified; re-running the Oracle procedure with the market
+open is still the way to close that gap. Nothing past the one adapter
+module depends on the raw wire format (everything else is built against
+the canonical `domain/snapshot.py::MarketSnapshot`), so correcting those
+three remaining endpoints later is still a localized fix, not a rewrite.
 
 ## What's real vs. what's v1-honest-but-shallow
 
@@ -39,11 +50,13 @@ from the same snapshot. That said, "done" here means "a solid, honest v1
 exists and is exercised by tests" — not "maximally sophisticated." Known
 v1 limitations, called out in each module's own docstring:
 
-- **No multi-day history in live mode.** A single snapshot fetch typically
-  only has today's M1 candles plus whatever `prev_day`/`prev_week` fields
-  the underlying endpoint exposes directly. `current_week_high/low` and a
-  genuine daily ATR are `None` until `replay/` (or a future live
-  accumulation loop) builds up history across sessions.
+- **No multi-day history in live mode.** Confirmed by the real payload
+  (2026-09-19 sample): the underlying/india_vix endpoints expose only
+  intraday candle arrays (`1m`/`5m`/`15m`/`1h`) — there is no daily/weekly
+  candle array and no `prev_day`/`prev_week` field at all, not merely an
+  unpopulated one. `current_week_high/low` and a genuine daily ATR are
+  `None` until `replay/` (or a future live accumulation loop) builds up
+  history across sessions.
 - **Option-chain "dynamic behaviour"** (how OI shifts as price approaches a
   level) is not implemented — `options/chain.py` is explicitly static-
   snapshot-only; true chain evolution needs the same multi-snapshot history
