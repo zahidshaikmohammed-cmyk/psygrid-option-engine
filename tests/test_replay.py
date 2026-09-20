@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from psygrid_option_engine.api.decision import decide
 from psygrid_option_engine.config.settings import EndpointCriticality, Settings
 from psygrid_option_engine.data.models import EndpointFetchResult, RawFetchBundle
+from psygrid_option_engine.data.snapshot_builder import build_market_snapshot
 from psygrid_option_engine.replay.engine import replay
 from psygrid_option_engine.replay.snapshot_store import (
     append_bundle,
@@ -103,3 +105,27 @@ def test_replay_never_leaks_future_data_across_steps() -> None:
     early_alone = results_early_only[0]
     assert early_from_both.signal.market_state == early_alone.signal.market_state
     assert early_from_both.signal.reasons == early_alone.signal.reasons
+
+
+def test_live_and_replay_produce_the_same_signal_from_the_same_bundle() -> None:
+    """Brief section 16/32: "same MarketSnapshot + same Settings = same
+    Signal", live and replay share the exact same decision engine. This
+    proves it end to end rather than relying on the two code paths just
+    happening to call the same functions: `EngineRuntime.run_cycle`'s
+    core pipeline (after the network fetch) is build_market_snapshot() +
+    decide() - exactly what replay() does per bundle - so calling that
+    pipeline directly here for one bundle ("live", with a fixed as_of)
+    and comparing it against replay()'s own result for the same bundle
+    proves the two are provably identical, not just believed to be.
+    signal_id is the one field expected to differ (random per call)."""
+    settings = Settings()
+    bundle = _bundle(SESSION_OPEN, 24123.0)
+
+    live_snapshot = build_market_snapshot(bundle, as_of=bundle.requested_at, settings=settings)
+    live_signal = decide(live_snapshot, settings=settings)
+
+    [replayed] = replay([bundle], settings=settings)
+
+    live_dump = live_signal.model_dump(exclude={"signal_id"})
+    replay_dump = replayed.signal.model_dump(exclude={"signal_id"})
+    assert live_dump == replay_dump

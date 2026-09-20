@@ -86,3 +86,45 @@ def test_redact_headers_allowlist() -> None:
     assert "date" in redacted
     assert "content-type" in redacted
     assert "set-cookie" not in redacted
+
+
+def test_classify_market_status_market_open_bool_true() -> None:
+    assert probe_upstream._classify_market_status({"market_open": True}) == "MARKET_OPEN"
+
+
+def test_classify_market_status_market_open_bool_false() -> None:
+    assert probe_upstream._classify_market_status({"market_open": False}) == "MARKET_CLOSED_EXPECTED"
+
+
+def test_classify_market_status_market_status_string() -> None:
+    assert probe_upstream._classify_market_status({"market_status": "CLOSED"}) == "MARKET_CLOSED"
+
+
+def test_classify_market_status_nested_session_status() -> None:
+    body = {"session": {"status": "CLOSED", "timezone": "Asia/Kolkata"}}
+    assert probe_upstream._classify_market_status(body) == "MARKET_CLOSED"
+
+
+def test_classify_market_status_nested_session_status_open() -> None:
+    body = {"session": {"status": "OPEN"}}
+    assert probe_upstream._classify_market_status(body) == "MARKET_OPEN"
+
+
+def test_classify_market_status_none_when_no_recognizable_field() -> None:
+    assert probe_upstream._classify_market_status({"advancing": 100, "declining": 50}) is None
+
+
+def test_classify_market_status_none_for_non_dict_body() -> None:
+    assert probe_upstream._classify_market_status([1, 2, 3]) is None
+
+
+def test_classify_market_status_real_underlying_sample() -> None:
+    # Real shape verified against artifacts/production_endpoint_samples.json
+    # (2026-09-19).
+    body = {"symbol": "NIFTY", "ltp": None, "session": {"status": "CLOSED", "timezone": "Asia/Kolkata"}}
+    assert probe_upstream._classify_market_status(body) == "MARKET_CLOSED"
+
+
+def test_classify_market_status_real_options_sample() -> None:
+    body = {"market_open": False, "market_status": "CLOSED", "status": "LIVE"}
+    assert probe_upstream._classify_market_status(body) == "MARKET_CLOSED_EXPECTED"

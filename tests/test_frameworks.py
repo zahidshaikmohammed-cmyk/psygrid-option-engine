@@ -118,6 +118,15 @@ def test_range_boundary_rejection_at_resistance_is_bearish() -> None:
     assert result.direction == "PUT"
 
 
+def test_range_boundary_rejection_at_support_is_bullish() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.SESSION_LOW, level=100.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.REJECTION)
+    ctx = _base_ctx(regime=_regime(MarketRegime.RANGE), level_reactions=(reaction,), ltp=105.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.RANGE_BOUNDARY_REJECTION)
+    assert result.applicable is True
+    assert result.direction == "CALL"
+
+
 def test_failed_breakout_reversal_bullish_on_failed_breakdown() -> None:
     zone = LiquidityZone(kind=LiquidityKind.PDL, level=100.0, note="x")
     reaction = LevelReaction(zone=zone, reaction=ReactionKind.FAILED_BREAK)
@@ -127,6 +136,15 @@ def test_failed_breakout_reversal_bullish_on_failed_breakdown() -> None:
     assert result.direction == "CALL"
 
 
+def test_failed_breakout_reversal_bearish_on_failed_breakout() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.PDH, level=200.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.FAILED_BREAK)
+    ctx = _base_ctx(regime=_regime(MarketRegime.FAILED_BREAKOUT), level_reactions=(reaction,), ltp=195.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.FAILED_BREAKOUT_REVERSAL)
+    assert result.applicable is True
+    assert result.direction == "PUT"
+
+
 def test_confirmed_structural_breakout_bullish_on_acceptance_above_resistance() -> None:
     zone = LiquidityZone(kind=LiquidityKind.PDH, level=100.0, note="x")
     reaction = LevelReaction(zone=zone, reaction=ReactionKind.ACCEPTANCE)
@@ -134,6 +152,15 @@ def test_confirmed_structural_breakout_bullish_on_acceptance_above_resistance() 
     result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.CONFIRMED_STRUCTURAL_BREAKOUT)
     assert result.applicable is True
     assert result.direction == "CALL"
+
+
+def test_confirmed_structural_breakout_bearish_on_acceptance_below_support() -> None:
+    zone = LiquidityZone(kind=LiquidityKind.PDL, level=200.0, note="x")
+    reaction = LevelReaction(zone=zone, reaction=ReactionKind.ACCEPTANCE)
+    ctx = _base_ctx(regime=_regime(MarketRegime.BREAKOUT_ATTEMPT), level_reactions=(reaction,), ltp=195.0)
+    result = next(r for r in evaluate_frameworks(ctx) if r.framework is FrameworkName.CONFIRMED_STRUCTURAL_BREAKOUT)
+    assert result.applicable is True
+    assert result.direction == "PUT"
 
 
 def test_compression_expansion_not_applicable_while_compressing() -> None:

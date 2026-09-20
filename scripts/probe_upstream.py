@@ -194,11 +194,39 @@ def _fetch_one(client: httpx.Client, path: str, retries: int) -> dict[str, Any]:
         result["observed_at"] = observed_at.isoformat() if observed_at else None
         result["freshness_seconds"] = freshness_seconds
         result["structural_issues"] = list(validate_structure(_logical_guess(path), body))
+        result["market_status_label"] = _classify_market_status(body)
         result["body"] = _redact(body)
         return result
 
     # Unreachable, but keeps mypy happy about a guaranteed return.
     raise last_exc if last_exc else RuntimeError("unreachable")
+
+
+def _classify_market_status(body: Any) -> str | None:
+    """Best-effort read of the market-open/closed signal PSYGRID's own
+    payloads carry - verified fields as of the 2026-09-19 production
+    sample: top-level `market_open` (bool) / `market_status` (str) on
+    options/depth payloads, nested `session.status` (str) on underlying/
+    india_vix payloads. Lets the probe distinguish "the provider itself
+    says the market is closed" (section 18/F: expected, not a failure)
+    from a genuine schema/availability problem, instead of guessing from
+    HTTP status or an empty body alone. Returns None when the payload
+    carries none of these fields (e.g. breadth/sectors/context, or an
+    endpoint still unverified)."""
+    if not isinstance(body, dict):
+        return None
+    market_open = body.get("market_open")
+    if isinstance(market_open, bool):
+        return "MARKET_OPEN" if market_open else "MARKET_CLOSED_EXPECTED"
+    market_status = body.get("market_status")
+    if isinstance(market_status, str):
+        return "MARKET_OPEN" if market_status.upper() == "OPEN" else f"MARKET_{market_status.upper()}"
+    session = body.get("session")
+    if isinstance(session, dict):
+        status = session.get("status")
+        if isinstance(status, str):
+            return "MARKET_OPEN" if status.upper() == "OPEN" else f"MARKET_{status.upper()}"
+    return None
 
 
 def _logical_guess(path: str) -> str:
@@ -253,7 +281,8 @@ def main() -> int:
             if result["ok"]:
                 ok_count += 1
                 issues = f" (issues: {result['structural_issues']})" if result["structural_issues"] else ""
-                print(f"OK    {path:40s} status={result['http_status']} {issues}")
+                market = f" [{result['market_status_label']}]" if result["market_status_label"] else ""
+                print(f"OK    {path:40s} status={result['http_status']}{market} {issues}")
             else:
                 fail_count += 1
                 print(f"FAIL  {path:40s} -> {result['error']}", file=sys.stderr)
