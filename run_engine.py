@@ -382,14 +382,24 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Run one complete cycle and exit (default).")
     mode.add_argument("--live", action="store_true", help="Continuously refresh and report.")
-    parser.add_argument("--underlying", choices=["NIFTY", "BANKNIFTY", "SENSEX", "ALL"], default="ALL")
+    # "BOTH" is accepted alongside "ALL" for backward compatibility: the
+    # Oracle systemd unit's ExecStart (.github/workflows/deploy-oracle.yml,
+    # not controlled by this codebase) hardcodes `--underlying BOTH` -
+    # dropping it silently crash-loops the deployed live service (argparse
+    # exits 2 on an unrecognized choice). "ALL" is the accurate name now
+    # that there are three underlyings; "BOTH" is kept working, not just
+    # documented, since an external caller can't be relied on to update in
+    # lockstep with this file.
+    parser.add_argument(
+        "--underlying", choices=["NIFTY", "BANKNIFTY", "SENSEX", "ALL", "BOTH"], default="ALL"
+    )
     parser.add_argument(
         "--interval", type=float, default=None, help="Seconds between cycles in --live mode."
     )
     args = parser.parse_args(argv)
 
     settings = get_settings()
-    underlyings = UNDERLYINGS if args.underlying == "ALL" else (args.underlying,)
+    underlyings = UNDERLYINGS if args.underlying in ("ALL", "BOTH") else (args.underlying,)
     interval = args.interval or settings.decision_interval_seconds
 
     with EngineRuntime(settings) as runtime:
