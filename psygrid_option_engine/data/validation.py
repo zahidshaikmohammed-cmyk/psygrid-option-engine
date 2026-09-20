@@ -198,6 +198,15 @@ def freshness_tolerance_for(logical_name: str, settings: Settings) -> float:
     return getattr(settings, attr)
 
 
+def _is_synthetic(payload: Any) -> bool:
+    """True if PSYGRID's own payload marks itself as synthetic/placeholder
+    data via `synthetic_data`/`synthetic_candles` (verified real fields -
+    see artifacts/production_endpoint_samples.json)."""
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("synthetic_data") is True or payload.get("synthetic_candles") is True
+
+
 def assess_source_status(
     result: EndpointFetchResult, *, as_of: datetime, tolerance_seconds: float
 ) -> SourceStatus:
@@ -216,6 +225,22 @@ def assess_source_status(
         # list container for an option chain). A structurally-invalid
         # critical payload must never be treated as healthy merely because
         # the fetch itself succeeded.
+        return SourceStatus(
+            fetched_at=result.fetched_at,
+            observed_at=result.observed_at,
+            age_seconds=None,
+            available=True,
+            status="ERROR",
+        )
+
+    if _is_synthetic(result.data):
+        # PSYGRID marks certain payloads with a synthetic_data/
+        # synthetic_candles=true flag (verified field, present but always
+        # False in the 2026-09-19 sample - the market was closed, not
+        # generating synthetic data, so a True value has not been directly
+        # observed, but the field exists for exactly this purpose).
+        # Fabricated/placeholder data must never be silently treated as
+        # real market data for a live decision.
         return SourceStatus(
             fetched_at=result.fetched_at,
             observed_at=result.observed_at,

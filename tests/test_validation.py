@@ -196,6 +196,45 @@ def test_build_data_quality_insufficient_on_structurally_invalid_critical() -> N
     assert "options" in dq.unavailable_fields
 
 
+def test_build_data_quality_insufficient_on_synthetic_critical_data() -> None:
+    """PSYGRID marks certain payloads as synthetic/placeholder via a
+    synthetic_data/synthetic_candles=true flag - fabricated data must
+    never be trusted for a live decision even if HTTP/JSON/structure/
+    freshness all otherwise look fine."""
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=NOW,
+        results={
+            "underlying": _result("underlying", criticality=EndpointCriticality.CRITICAL),
+            "options": _result(
+                "options", criticality=EndpointCriticality.CRITICAL, data={"data": [], "synthetic_data": True}
+            ),
+            "depth": _result("depth", criticality=EndpointCriticality.CRITICAL, data=[]),
+        },
+    )
+    dq = build_data_quality(bundle, settings=Settings(), as_of=NOW)
+    assert dq.overall == "INSUFFICIENT"
+    assert dq.critical_endpoints_ok is False
+    assert "options" in dq.unavailable_fields
+
+
+def test_build_data_quality_good_when_synthetic_flag_false() -> None:
+    bundle = RawFetchBundle(
+        underlying="NIFTY",
+        requested_at=NOW,
+        results={
+            "underlying": _result("underlying", criticality=EndpointCriticality.CRITICAL),
+            "options": _result(
+                "options", criticality=EndpointCriticality.CRITICAL, data={"data": [], "synthetic_data": False}
+            ),
+            "depth": _result("depth", criticality=EndpointCriticality.CRITICAL, data=[]),
+        },
+    )
+    dq = build_data_quality(bundle, settings=Settings(), as_of=NOW)
+    assert dq.overall == "GOOD"
+    assert dq.critical_endpoints_ok is True
+
+
 def test_build_data_quality_insufficient_on_future_dated_critical() -> None:
     """A critical payload whose self-reported observation time is AFTER
     the decision's own as_of is an information-boundary violation and must

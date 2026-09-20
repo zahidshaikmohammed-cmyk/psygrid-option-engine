@@ -6,13 +6,22 @@ upstream service) and produces a strictly-typed `TRADE_READY` or `NO_TRADE`
 signal — never an order. See `docs/SAFETY.md`: this engine never places
 broker orders.
 
-**Status: Phases 0–10 of 11 implemented** (replay's capture/replay
-machinery exists; outcome measurement and calibration don't yet — see
-`docs/PHASES.md`). The full pipeline — data ingestion, structure/momentum/
-volatility/futures/chain/breadth analysis, the authorization/confluence/
-tier engine, contract selection, premium execution engineering, and risk
-validation — is real, tested, deterministic logic, wired end to end
-through `run_engine.py`.
+**Status: Phases 0–10 of 11 implemented, plus a production-hardening pass**
+(replay's capture/replay machinery exists; outcome measurement and
+calibration don't yet — see `docs/PHASES.md`). The full pipeline — data
+ingestion, structure/momentum/volatility/futures/chain/breadth analysis,
+the authorization/confluence/tier engine, contract selection, premium
+execution engineering, and risk validation — is real, tested,
+deterministic logic, wired end to end through `run_engine.py`. The
+production-hardening pass (`docs/PHASES.md`, "Production hardening")
+closed several concrete correctness/safety gaps found by auditing against
+the codebase's own "no fabrication, fail closed" design rule: a critical
+endpoint that's stale/structurally-invalid/future-dated/synthetic-flagged
+now genuinely blocks `TRADE_READY` (not just an HTTP-level check), a
+fabricated depth quote and a fabricated "weekly range" were removed, two
+fully-built evidence modules that were never actually wired in now are,
+and `--live` mode now force-exits an active trade at the 15:00 IST cutoff
+and cannot immediately resurrect a just-resolved setup.
 
 **✅ The upstream field-name contract was verified against a real
 production payload on 2026-09-19** for most endpoints (see

@@ -14,9 +14,10 @@ variables prefixed `PSYGRID_`, or a `.env` file (git-ignored). See
 | `PSYGRID_RETRY_BACKOFF_SECONDS` | `0.5` | Base backoff; actual wait is `backoff * 2**attempt` with jitter, capped. |
 | `PSYGRID_FRESHNESS_TOLERANCE_*_SECONDS` | see `.env.example` | Per-endpoint-class max age before a field is `STALE` rather than `OK`. Deliberately per-class, not global — see `config/settings.py`. |
 | `PSYGRID_DECISION_INTERVAL_SECONDS` | `15.0` | How often the runtime loop re-enters `DATA_LOADING`. |
+| `PSYGRID_LIFECYCLE_REENTRY_COOLDOWN_SECONDS` | `300.0` | `--live` mode only: minimum seconds before the exact same setup identity (framework + direction + structural invalidation level) may leave a resolved (invalidated/targeted/session-expired) state and reactivate. Secondary safeguard against a same-level whipsaw re-entry — the primary guard is identity itself (see `run_engine.py::_lifecycle_key`, `signals/lifecycle.py`). |
 | `PSYGRID_MARKET_OPEN` / `PSYGRID_MARKET_CLOSE` | `09:15` / `15:30` | Session window, IST wall-clock (`HH:MM`). |
 | `PSYGRID_OPENING_PERIOD_MINUTES` | `15` | Length of the `OPENING` session phase after open. |
-| `PSYGRID_ENTRY_CUTOFF` | `15:00` | No new trade entries at/after this IST time. |
+| `PSYGRID_ENTRY_CUTOFF` | `15:00` | No new trade entries at/after this IST time. In `--live` mode, this same boundary also force-exits any internally ACTIVE trade still being monitored (`run_engine.py::_force_session_exit`) — see `docs/PHASES.md`. |
 | `PSYGRID_LATE_SESSION_START` | `14:30` | Start of `LATE_SESSION` phase. |
 
 `Settings.session_window()` builds a `config.session.SessionWindow` from
