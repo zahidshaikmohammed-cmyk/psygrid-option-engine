@@ -14,6 +14,7 @@ from psygrid_option_engine.api.runtime import CycleResult
 from psygrid_option_engine.api.state_machine import EngineState
 from psygrid_option_engine.config.settings import EndpointCriticality, Settings
 from psygrid_option_engine.data.models import EndpointFetchResult, RawFetchBundle
+from psygrid_option_engine.notifications.telegram import TelegramNotifier
 from psygrid_option_engine.signals.lifecycle import LifecycleState, LifecycleTracker
 from psygrid_option_engine.signals.schema import (
     ContractRef,
@@ -226,6 +227,12 @@ def _trade(**overrides: object) -> run_engine.ActiveTrade:  # noqa: F821 - resol
     return run_engine.ActiveTrade(**defaults)
 
 
+def _disabled_notifier() -> TelegramNotifier:
+    # No token/chat id configured - `enabled` is False, so `_send` is a
+    # guaranteed no-op and never actually touches the network.
+    return TelegramNotifier(Settings())
+
+
 def _result_with_ltp_and_premium(*, ltp: float, security_id: str | None, premium: float | None) -> CycleResult:
     signal = _no_trade_signal()
     signal = signal.model_copy(update={"market_state": {**signal.market_state, "ltp": ltp}})
@@ -238,7 +245,7 @@ def test_register_new_active_trades_adds_entry() -> None:
         "NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), _trade_ready_signal(), "x")
     }
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker())
+    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker(), _disabled_notifier())
     assert "NIFTY" in active
     assert active["NIFTY"].security_id == "CE1"
     assert active["NIFTY"].direction == "CALL"
@@ -250,14 +257,14 @@ def test_register_skips_if_already_tracked() -> None:
     }
     existing = _trade(security_id="OLD")
     active = {"NIFTY": existing}
-    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker())
+    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker(), _disabled_notifier())
     assert active["NIFTY"] is existing
 
 
 def test_register_skips_no_trade_signal() -> None:
     results = {"NIFTY": CycleResult(EngineState.NO_TRADE, "NIFTY", None, _data_quality(), _no_trade_signal(), "x")}
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker())
+    run_engine._register_new_active_trades(active, results, NOW, LifecycleTracker(), _disabled_notifier())
     assert active == {}
 
 
@@ -273,7 +280,7 @@ def test_register_skips_same_setup_identity_still_cooling_down() -> None:
 
     results = {"NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), signal, "x")}
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, NOW, tracker)
+    run_engine._register_new_active_trades(active, results, NOW, tracker, _disabled_notifier())
     assert active == {}  # not re-registered while cooling down
 
 
@@ -291,7 +298,7 @@ def test_register_allows_genuinely_new_setup_at_different_level() -> None:
     )
     results = {"NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), new_signal, "x")}
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, NOW, tracker)
+    run_engine._register_new_active_trades(active, results, NOW, tracker, _disabled_notifier())
     assert "NIFTY" in active
 
 
@@ -306,7 +313,7 @@ def test_register_allows_after_cooldown_elapses() -> None:
     later = NOW + timedelta(seconds=301)
     results = {"NIFTY": CycleResult(EngineState.TRADE_READY, "NIFTY", None, _data_quality(), signal, "x")}
     active: dict = {}
-    run_engine._register_new_active_trades(active, results, later, tracker)
+    run_engine._register_new_active_trades(active, results, later, tracker, _disabled_notifier())
     assert "NIFTY" in active
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from psygrid_option_engine.config.session import SessionWindow
@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     late_session_start: str = Field(default="14:30")
 
     supported_underlyings: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
+
+    # --- Telegram notifications (optional; see notifications/telegram.py) ---
+    # Unset by default - notifications are a no-op until both are provided.
+    # Never given a literal default per this module's own docstring above.
+    telegram_bot_token: SecretStr | None = Field(
+        default=None, description="Telegram bot token from @BotFather."
+    )
+    telegram_chat_id: str | None = Field(
+        default=None, description="Telegram chat/channel ID to notify."
+    )
 
     @field_validator("base_url")
     @classmethod

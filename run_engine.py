@@ -26,6 +26,7 @@ from psygrid_option_engine.authorization.tiers import TIER_LABELS, Tier
 from psygrid_option_engine.config.session import SessionPhase
 from psygrid_option_engine.config.settings import Settings, get_settings
 from psygrid_option_engine.data.snapshot_builder import build_market_snapshot
+from psygrid_option_engine.notifications.telegram import TelegramNotifier
 from psygrid_option_engine.signals.lifecycle import LifecycleTracker
 from psygrid_option_engine.signals.schema import Signal, TradeReadySignal
 
@@ -225,6 +226,7 @@ def _register_new_active_trades(
     results: dict[str, CycleResult],
     now: datetime,
     tracker: LifecycleTracker,
+    notifier: TelegramNotifier,
 ) -> None:
     """Registers each underlying's freshest TRADE_READY signal for active
     monitoring - but not if that exact setup identity (see
@@ -257,6 +259,7 @@ def _register_new_active_trades(
         print(f"[{underlying}] now monitoring active trade: {signal.contract.symbol} "
               f"entry={signal.execution.entry:.2f} sl={signal.execution.stop_loss:.2f} "
               f"tp={signal.execution.take_profit:.2f}")
+        notifier.notify_trade_ready(underlying, signal)
 
 
 def _check_active_trades(
@@ -335,7 +338,10 @@ def _run_live(
     settings = settings or get_settings()
     tracker = LifecycleTracker(reentry_cooldown_seconds=settings.lifecycle_reentry_cooldown_seconds)
     active_trades: dict[str, ActiveTrade] = {}
+    notifier = TelegramNotifier(settings)
     print(f"Live mode: refreshing every {interval:.0f}s. Signal-only - this process never places orders.")
+    if notifier.enabled:
+        print("Telegram notifications: enabled.")
     print("Press Ctrl+C to stop.\n")
 
     try:
@@ -345,7 +351,7 @@ def _run_live(
 
             session_exited = _force_session_exit(active_trades, tracker, now=now, settings=settings)
             trade_resolved = _check_active_trades(active_trades, results, tracker, now=now, settings=settings)
-            _register_new_active_trades(active_trades, results, now, tracker)
+            _register_new_active_trades(active_trades, results, now, tracker, notifier)
 
             changed = trade_resolved or session_exited
             for u, result in results.items():
@@ -372,6 +378,8 @@ def _run_live(
             time_module.sleep(interval)
     except KeyboardInterrupt:
         print("\nStopped.")
+    finally:
+        notifier.close()
     return 0
 
 
@@ -396,9 +404,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--interval", type=float, default=None, help="Seconds between cycles in --live mode."
     )
+    parser.add_argument(
+        "--telegram-test",
+        action="store_true",
+        help="Send a Telegram test message using the configured "
+        "PSYGRID_TELEGRAM_BOT_TOKEN/PSYGRID_TELEGRAM_CHAT_ID, then exit "
+        "without running the engine.",
+    )
     args = parser.parse_args(argv)
 
     settings = get_settings()
+
+    if args.telegram_test:
+        with TelegramNotifier(settings) as notifier:
+            if not notifier.enabled:
+                print(
+                    "Telegram notifications are not configured - set both "
+                    "PSYGRID_TELEGRAM_BOT_TOKEN and PSYGRID_TELEGRAM_CHAT_ID.",
+                    file=sys.stderr,
+                )
+                return 1
+            ok = notifier.send_test_message()
+            print("Test message sent." if ok else "Test message failed - see stderr for details.")
+            return 0 if ok else 1
+
     underlyings = UNDERLYINGS if args.underlying in ("ALL", "BOTH") else (args.underlying,)
     interval = args.interval or settings.decision_interval_seconds
 
